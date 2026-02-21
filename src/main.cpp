@@ -1,12 +1,33 @@
 #include <Arduino.h>
 #include <soc/gpio_struct.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+#include <time.h>
+#include <esp_sntp.h>    // Added for custom NTP sync intervals
+#include <HTTPClient.h>  // Added for fetching weather
+#include <ArduinoJson.h> // Added for reading weather data
 
 // ==========================================
 // 1. CONFIGURATION
 // ==========================================
 const bool ENABLE_GAPS = true;
-int BRIGHTNESS = 400; 
-int REFRESH_INTERVAL_US = 900; 
+int BRIGHTNESS = 1000; 
+int REFRESH_INTERVAL_US = 1200; 
+
+// --- NETWORK & TIME CONFIG ---
+const char* WIFI_SSID = "Link2";
+const char* WIFI_PASSWORD = "Horvat2017";
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 7200;       
+const int   daylightOffset_sec = 3600;  
+
+char ipString[30] = "WAITING FOR IP...";
+
+// --- WEATHER CONFIG ---
+char liveWeatherString[100] = "WAITING FOR WEATHER...   ";
+unsigned long lastWeatherUpdate = 0;
+const unsigned long weatherUpdateInterval = 30 * 60 * 1000; // Update every 30 minutes
 
 // ==========================================
 // 2. PIN DEFINITIONS (FIXED)
@@ -94,11 +115,12 @@ const uint8_t FONT_TEXT[][5] = {
 };
 
 // ==========================================
-// 5. GRAPHICS ENGINE
+// 5. GRAPHICS ENGINE & HELPERS
 // ==========================================
 void clearBuffer() {
     memset((void*)displayBuffer, 0, sizeof(displayBuffer));
 }
+
 int getPhysicalX(int vx) {
     if (!ENABLE_GAPS) return vx;
     int modIdx = vx / VIRTUAL_MOD_WIDTH;
@@ -106,6 +128,7 @@ int getPhysicalX(int vx) {
     if (offset >= MODULE_WIDTH) return -1;
     return (modIdx * MODULE_WIDTH) + offset;
 }
+
 void setPixel(int virtualX, int y, uint8_t state) {
     if (virtualX < 0 || virtualX >= VIRTUAL_COLS || y < 0 || y >= ROWS) return;
     int physX = getPhysicalX(virtualX);
@@ -117,13 +140,23 @@ void setPixel(int virtualX, int y, uint8_t state) {
         else       displayBuffer[y][byteIdx] &= ~(1 << bitIdx);
     }
 }
+
 int getVirtualModuleStart(uint8_t screen, uint8_t mod) {
     int globalMod = (screen * MODS_PER_SCREEN) + mod;
     return globalMod * VIRTUAL_MOD_WIDTH;
 }
+
+uint8_t getCharIdxText(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 1;
+    if (c >= '0' && c <= '9') return c - '0' + 27;
+    if (c == '%') return 36; // Using standard icon mapping if % isn't defined, replace if needed
+    if (c == '.') return 0; 
+    return 0;
+}
+
 void drawChar(uint8_t screen, uint8_t mod, char c) {
     int startX = getVirtualModuleStart(screen, mod);
-    uint8_t idx = 12; // Space
+    uint8_t idx = 12; 
     if (c >= '0' && c <= '9') idx = c - '0';
     if (c == '.') idx = 10;
     if (c == '-') idx = 11;
@@ -134,6 +167,27 @@ void drawChar(uint8_t screen, uint8_t mod, char c) {
         }
     }
 }
+
+void drawModuleChar(uint8_t screen, uint8_t mod, char c) {
+    if (c == ':') {
+        int startX = getVirtualModuleStart(screen, mod);
+        setPixel(startX + 1, 2, 1); setPixel(startX + 1, 5, 1);
+        setPixel(startX + 2, 2, 1); setPixel(startX + 2, 5, 1);
+        return;
+    }
+    
+    uint8_t idx = getCharIdxText(c);
+    if (idx == 0 && c != ' ') return; 
+    
+    int startX = getVirtualModuleStart(screen, mod);
+    for(int col=0; col<5; col++) {
+        uint8_t data = FONT_TEXT[idx][col];
+        for(int r=0; r<8; r++) {
+            if (data & (1<<r)) setPixel(startX + col, r, 1);
+        }
+    }
+}
+
 void drawIcon(uint8_t screen, uint8_t mod, const uint8_t* icon) {
     int startX = getVirtualModuleStart(screen, mod);
     for (uint8_t col = 0; col < 5; col++) {
@@ -143,6 +197,7 @@ void drawIcon(uint8_t screen, uint8_t mod, const uint8_t* icon) {
         }
     }
 }
+
 void drawTemp(uint8_t screen, uint8_t startMod, float temp) {
     int val = (int)(abs(temp) * 10);
     int d3 = val % 10;           
@@ -159,15 +214,24 @@ void drawTemp(uint8_t screen, uint8_t startMod, float temp) {
     drawChar(screen, startMod+2, '.');
     drawChar(screen, startMod+3, '0'+d3);
 }
-uint8_t getCharIdxText(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A' + 1;
-    if (c >= '0' && c <= '9') return c - '0' + 27;
-    return 0;
-}
+
 void drawTextAt(int x, const char* msg) {
     int len = strlen(msg);
     for(int i=0; i<len; i++) {
         uint8_t idx = getCharIdxText(msg[i]);
+        if (msg[i] == '.') {
+            setPixel(x+1, 7, 1); 
+            x += 3;
+            continue;
+        }
+        if (msg[i] == '%') {
+            // Draw a tiny % manually if font lacks it
+            setPixel(x, 1, 1); setPixel(x+3, 1, 1);
+            setPixel(x+1, 3, 1); setPixel(x+2, 4, 1);
+            setPixel(x, 6, 1); setPixel(x+3, 6, 1);
+            x += 5;
+            continue;
+        }
         for(int col=0; col<5; col++) {
              uint8_t data = FONT_TEXT[idx][col];
              for(int r=0; r<8; r++) if(data & (1<<r)) setPixel(x+col, r, 1);
@@ -176,31 +240,259 @@ void drawTextAt(int x, const char* msg) {
     }
 }
 
+String normalizeCityName(String name) {
+    // 1. Replace Romanian diacritics with basic letters
+    name.replace("ă", "A"); name.replace("Ă", "A");
+    name.replace("â", "A"); name.replace("Â", "A");
+    name.replace("î", "I"); name.replace("Î", "I");
+    // Handle both the correct comma-below and the older cedilla versions
+    name.replace("ș", "S"); name.replace("Ș", "S");
+    name.replace("ş", "S"); name.replace("Ş", "S"); 
+    name.replace("ț", "T"); name.replace("Ț", "T");
+    name.replace("ţ", "T"); name.replace("Ţ", "T");
+    
+    // 2. Force standard characters to uppercase
+    name.toUpperCase();
+    
+    // 3. Strip out ANYTHING that isn't A-Z, 0-9, space, or a hyphen
+    String cleanName = "";
+    for (int i = 0; i < name.length(); i++) {
+        char c = name[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-') {
+            cleanName += c;
+        }
+    }
+    return cleanName;
+}
+
+const char* getWeatherCondition(int code) {
+    if (code == 0) return "CLEAR";
+    if (code == 1 || code == 2) return "PARTLY CLOUDY";
+    if (code == 3) return "OVERCAST";
+    if (code >= 45 && code <= 48) return "FOGGY";
+    if (code >= 51 && code <= 67) return "RAIN";
+    if (code >= 71 && code <= 77) return "SNOW";
+    if (code >= 80 && code <= 82) return "SHOWERS";
+    if (code >= 95 && code <= 99) return "THUNDERSTORM";
+    return "UNKNOWN";
+}
+
 // ==========================================
-// 6. NON-BLOCKING ANIMATIONS
-// Each returns 'true' when the animation is fully complete.
-// Pass 'true' to the 'init' parameter to reset their internal state.
+// 6. NETWORK FETCH FUNCTIONS
 // ==========================================
+// You can easily change this target city to anything you want!
+// Change these whenever you want to track a different location
+String targetCityName = "Sauca"; 
+String targetCountryCode = "RO";   // Lock it to Romania
+String targetRegion = "Satu Mare"; // Lock it to the specific county
+
+void fetchWeather() {
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        
+        // --- STEP 1: Look up the city name (Ask for 10 results instead of 1) ---
+        String geoUrl = "http://geocoding-api.open-meteo.com/v1/search?name=" + targetCityName + "&count=10";
+        http.begin(geoUrl);
+        int geoResponseCode = http.GET();
+        
+        if (geoResponseCode == 200) {
+            String geoPayload = http.getString();
+            JsonDocument geoDoc; 
+            DeserializationError geoError = deserializeJson(geoDoc, geoPayload);
+            
+            if (!geoError && geoDoc["results"].size() > 0) {
+                float lat = 0.0;
+                float lon = 0.0;
+                String officialName = "";
+                bool matchFound = false;
+
+                // Loop through the results to find our exact Romanian village
+                JsonArray results = geoDoc["results"];
+                for (JsonObject result : results) {
+                    String cCode = result["country_code"].as<String>();
+                    String admin1 = result["admin1"].as<String>(); 
+                    
+                    // Does the country match? (e.g., "RO")
+                    if (cCode == targetCountryCode) {
+                        // Does the region match? (e.g., "Satu Mare")
+                        // If targetRegion is left empty "", it will just take the first match in the country
+                        if (targetRegion == "" || admin1.indexOf(targetRegion) >= 0) {
+                            lat = result["latitude"];
+                            lon = result["longitude"];
+                            String rawName = result["name"].as<String>();
+                            officialName = normalizeCityName(rawName);
+                            matchFound = true;
+                            break; // Stop looking, we found the right Sauca!
+                        }
+                    }
+                }
+
+                http.end(); // Close the first connection
+
+                if (matchFound) {
+                    // --- STEP 2: Fetch the weather using the CORRECT coordinates ---
+                    String weatherUrl = "http://api.open-meteo.com/v1/forecast?latitude=" + String(lat, 4) + "&longitude=" + String(lon, 4) + "&current=temperature_2m,relative_humidity_2m,weather_code";
+                    http.begin(weatherUrl);
+                    int weatherResponseCode = http.GET();
+                    
+                    if (weatherResponseCode == 200) {
+                        String weatherPayload = http.getString();
+                        JsonDocument weatherDoc;
+                        DeserializationError weatherError = deserializeJson(weatherDoc, weatherPayload);
+                        
+                        if (!weatherError) {
+                            float temp = weatherDoc["current"]["temperature_2m"];
+                            int hum = weatherDoc["current"]["relative_humidity_2m"];
+                            int wmoCode = weatherDoc["current"]["weather_code"];
+                            
+                            const char* condition = getWeatherCondition(wmoCode);
+                            
+                            // Write it to the display buffer
+                            sprintf(liveWeatherString, "%s: %s %dC   HUMIDITY %d%%   ", officialName.c_str(), condition, (int)round(temp), hum);
+                        }
+                    }
+                    http.end();
+                } else {
+                    sprintf(liveWeatherString, "CITY %s IN %s NOT FOUND   ", normalizeCityName(targetCityName).c_str(), targetCountryCode.c_str());
+                }
+            } else {
+                sprintf(liveWeatherString, "CITY %s NOT FOUND   ", normalizeCityName(targetCityName).c_str());
+                http.end();
+            }
+        }
+    }
+}
+
+// ==========================================
+// 7. NON-BLOCKING ANIMATIONS
+// ==========================================
+bool animTimeWeather(int durationMs, const char* weatherMsg, bool init = false) {
+    static unsigned long startMillis = 0;
+    static unsigned long prevScroll = 0;
+    static unsigned long prevBlink = 0;
+    static int scrollX = 0;
+    static bool blinkState = true;
+
+    int screen1Start = getVirtualModuleStart(1, 0);
+
+    if (init) {
+        startMillis = millis();
+        prevScroll = millis();
+        prevBlink = millis();
+        scrollX = VIRTUAL_COLS;
+        blinkState = true;
+        return false;
+    }
+
+    if (millis() - startMillis >= durationMs) {
+        return true; 
+    }
+
+    bool needsRedraw = false;
+
+    if (millis() - prevBlink >= 500) {
+        prevBlink = millis();
+        blinkState = !blinkState;
+        needsRedraw = true;
+    }
+
+    if (millis() - prevScroll >= 30) {
+        prevScroll = millis();
+        scrollX--;
+        int len = strlen(weatherMsg);
+        if (scrollX < screen1Start - (len * 6)) {
+            scrollX = VIRTUAL_COLS; 
+        }
+        needsRedraw = true;
+    }
+
+    if (needsRedraw) {
+        clearBuffer();
+
+        // --- SCREEN 0: Time ---
+        struct tm timeinfo;
+        if(getLocalTime(&timeinfo)) {
+            char timeStr[16];
+            strftime(timeStr, sizeof(timeStr), "%d %b %H %M", &timeinfo);
+            
+            for(int i=0; i<12; i++) {
+                char c = timeStr[i];
+                if(c >= 'a' && c <= 'z') c -= 32; 
+                drawModuleChar(0, i + 2, c);
+            }
+            if (blinkState) drawModuleChar(0, 9 + 2, ':');
+        }
+
+        // --- SCREEN 1: Weather Scroll ---
+        int len = strlen(weatherMsg);
+        int x = scrollX;
+        for(int i=0; i<len; i++) {
+            char c = weatherMsg[i];
+
+            // 1. Force lowercase to uppercase
+            if (c >= 'a' && c <= 'z') {
+                c -= 32; 
+            }
+
+            // 2. Handle Custom '%'
+            if (c == '%') {
+                for(int col=0; col<4; col++) {
+                    int vx = x + col;
+                    if (vx >= screen1Start && vx < VIRTUAL_COLS) {
+                         if(col==0) { setPixel(vx, 1, 1); setPixel(vx, 6, 1); }
+                         if(col==1) setPixel(vx, 3, 1);
+                         if(col==2) setPixel(vx, 4, 1);
+                         if(col==3) { setPixel(vx, 1, 1); setPixel(vx, 6, 1); }
+                    }
+                }
+                x += 5;
+                continue;
+            }
+
+            // 3. Handle Custom ':'
+            if (c == ':') {
+                int vx = x;
+                if (vx >= screen1Start && vx < VIRTUAL_COLS) {
+                    setPixel(vx, 2, 1); setPixel(vx, 5, 1); // Draw the two dots
+                }
+                x += 3; // Colons are narrow, so we save space
+                continue;
+            }
+
+            // 4. Handle Custom '.'
+            if (c == '.') {
+                int vx = x;
+                if (vx >= screen1Start && vx < VIRTUAL_COLS) {
+                    setPixel(vx, 7, 1); // Draw a single dot at the bottom
+                }
+                x += 3; // Dots are narrow
+                continue;
+            }
+
+            // 5. Normal Characters
+            uint8_t idx = getCharIdxText(c);
+            for(int col=0; col<5; col++) {
+                int vx = x + col;
+                if (vx >= screen1Start && vx < VIRTUAL_COLS) {
+                    uint8_t data = FONT_TEXT[idx][col];
+                    for(int r=0; r<8; r++) if(data & (1<<r)) setPixel(vx, r, 1);
+                }
+            }
+            x += 6; 
+        }
+    }
+    return false;
+}
 
 bool animSparkle(int speed, bool init = false) {
     static unsigned long prevMillis = 0;
     static int count = 0;
-
-    if (init) {
-        count = 0;
-        prevMillis = millis();
-        return false;
-    }
-
+    if (init) { count = 0; prevMillis = millis(); return false; }
     if (millis() - prevMillis >= speed) {
         prevMillis = millis();
         setPixel(random(0, VIRTUAL_COLS), random(0, ROWS), 0);
         count++;
-
-        if (count >= 800) {
-            clearBuffer();
-            return true; // Done
-        }
+        if (count >= 800) { clearBuffer(); return true; }
     }
     return false;
 }
@@ -208,41 +500,18 @@ bool animSparkle(int speed, bool init = false) {
 bool animScanner(int loops, bool init = false) {
     static unsigned long prevMillis = 0;
     static int currentLoop = 0;
-    static int i = 0;
-    static int dir = 1; // 1 for right, -1 for left
-
-    if (init) {
-        currentLoop = 0;
-        i = 0;
-        dir = 1;
-        prevMillis = millis();
-        return false;
-    }
-
+    static int i = 0, dir = 1; 
+    if (init) { currentLoop = 0; i = 0; dir = 1; prevMillis = millis(); return false; }
     if (millis() - prevMillis >= 5) {
         prevMillis = millis();
         clearBuffer();
         for(int w=0; w<4; w++) {
-            for(int h=0; h<8; h++) {
-                setPixel(i+w, h, 1);
-            }
+            for(int h=0; h<8; h++) setPixel(i+w, h, 1);
         }
-
         i += (dir * 2);
-
-        // Turn around logic
-        if (dir == 1 && i >= VIRTUAL_COLS - 4) {
-            dir = -1;
-            i = VIRTUAL_COLS - 4; // Clamp
-        } else if (dir == -1 && i <= 0) {
-            dir = 1;
-            i = 0;
-            currentLoop++;
-
-            if (currentLoop >= loops) {
-                clearBuffer();
-                return true; // Done
-            }
+        if (dir == 1 && i >= VIRTUAL_COLS - 4) { dir = -1; i = VIRTUAL_COLS - 4; } 
+        else if (dir == -1 && i <= 0) { dir = 1; i = 0; currentLoop++;
+            if (currentLoop >= loops) { clearBuffer(); return true; }
         }
     }
     return false;
@@ -252,22 +521,13 @@ bool animScroll(const char* txt, bool init = false) {
     static unsigned long prevMillis = 0;
     static int x = 0;
     int len = strlen(txt);
-
-    if (init) {
-        x = VIRTUAL_COLS;
-        prevMillis = millis();
-        return false;
-    }
-
+    if (init) { x = VIRTUAL_COLS; prevMillis = millis(); return false; }
     if (millis() - prevMillis >= 20) {
         prevMillis = millis();
         clearBuffer();
         drawTextAt(x, txt);
         x--;
-
-        if (x <= -(len * 6)) {
-            return true; // Done
-        }
+        if (x <= -(len * 6)) return true;
     }
     return false;
 }
@@ -277,32 +537,17 @@ bool animTypewriter(const char* msg, bool init = false) {
     static int charIndex = 0;
     static bool isWaiting = false;
     int len = strlen(msg);
-
-    if (init) {
-        clearBuffer();
-        charIndex = 0;
-        isWaiting = false;
-        prevMillis = millis();
-        return false;
-    }
-
+    if (init) { clearBuffer(); charIndex = 0; isWaiting = false; prevMillis = millis(); return false; }
     if (isWaiting) {
-        // Wait 3 seconds at the end
-        if (millis() - prevMillis >= 3000) {
-            return true; // Done
-        }
+        if (millis() - prevMillis >= 3000) return true;
     } else {
         if (millis() - prevMillis >= 80) {
             prevMillis = millis();
             int startX = (len * 6 < VIRTUAL_COLS) ? (VIRTUAL_COLS - (len * 6)) / 2 : 0;
-            
             char buf[2] = {msg[charIndex], '\0'};
             drawTextAt(startX + (charIndex * 6), buf);
-            
             charIndex++;
-            if (charIndex >= len) {
-                isWaiting = true; 
-            }
+            if (charIndex >= len) isWaiting = true; 
         }
     }
     return false;
@@ -310,16 +555,13 @@ bool animTypewriter(const char* msg, bool init = false) {
 
 bool displayStaticScreen(bool init = false) {
     static unsigned long prevMillis = 0;
-
     if (init) {
         clearBuffer();
-        // -- Screen 0 (Left) --
         drawTemp(0, 0, 24.5);             
         drawIcon(0, 5, ICON_SUN_MOD);     
         drawTemp(0, 9, 18.2);             
         drawIcon(0, 14, ICON_CLOUD_MOD);
 
-        // -- Screen 1 (Right) --
         drawTemp(1, 0, 12.0);
         drawIcon(1, 5, ICON_RAIN_MOD);
         drawTemp(1, 9, -5.5);
@@ -328,92 +570,93 @@ bool displayStaticScreen(bool init = false) {
         prevMillis = millis();
         return false;
     }
-
-    if (millis() - prevMillis >= 5000) {
-        return true; // Done waiting 5 seconds
-    }
+    if (millis() - prevMillis >= 5000) return true;
     return false;
 }
 
 // ==========================================
-// 7. SETUP & ISR
+// 8. SETUP & ISR
 // ==========================================
 void IRAM_ATTR onTimer() {
     static uint8_t currentRow = 0;
 
-    // 1. Blank Output
     OE_HIGH(); 
-
-    // 2. Select Row (Address ABC)
-    // Vertically flipped logic: 7 - currentRow
     uint8_t addr = 7 - currentRow;
     if (addr & 0x01) ADDR_A_HIGH(); else ADDR_A_LOW();
     if (addr & 0x02) ADDR_B_HIGH(); else ADDR_B_LOW();
     if (addr & 0x04) ADDR_C_HIGH(); else ADDR_C_LOW();
 
-    // Row Stabilization
     for(volatile int k=0; k<5; k++) __asm__("nop");
 
-    // 3. Shift Out Data
     for (int8_t b = 0; b < BUFFER_BYTES; b++) {
         uint8_t data = displayBuffer[currentRow][b];
         for (int8_t i = 0; i < 8; i++) {
             CLK_LOW();
-            
-            // Set Data
-            if (data & (1 << i)) DATA_HIGH();
-            else                DATA_LOW();
-
-            // Setup Time Delay
+            if (data & (1 << i)) DATA_HIGH(); else DATA_LOW();
             for(volatile int k=0; k<4; k++) __asm__("nop"); 
-            
             CLK_HIGH();
-            
-            // Hold Time Delay
             for(volatile int k=0; k<4; k++) __asm__("nop"); 
         }
     }
 
-    // 4. Latch Data
     STR_HIGH();
-    // Latch Duration Delay
     for(volatile int k=0; k<4; k++) __asm__("nop"); 
     STR_LOW();
 
-    // 5. Unblank (Display ON) & PWM Brightness
-    OE_LOW(); // ON
-    
+    OE_LOW(); 
     if (BRIGHTNESS > 0) {
         long loops = BRIGHTNESS * 10; 
         while(loops--) __asm__("nop");
     }
-    
-    OE_HIGH(); // OFF
+    OE_HIGH(); 
 
-    // 6. Next Row
     currentRow = (currentRow + 1) & 0x07;
 }
 
 void setup() {
-    // Pin Setup
+    Serial.begin(115200);
+
     pinMode(DATA_PIN, OUTPUT); pinMode(CLK_PIN, OUTPUT);
     pinMode(STR_PIN, OUTPUT);  pinMode(OE_PIN, OUTPUT);
     pinMode(ADDR_A, OUTPUT);   pinMode(ADDR_B, OUTPUT);
     pinMode(ADDR_C, OUTPUT);   pinMode(G1_BLANK, OUTPUT);
     
     OE_HIGH(); 
-    BLANK_HIGH(); // Keep G1 high
+    BLANK_HIGH(); 
 
-    // --- TIMER SETUP ---
+    // USING STABLE HARDWARE TIMER
     timer = timerBegin(1000000); 
     timerAttachInterrupt(timer, &onTimer);
     timerAlarm(timer, REFRESH_INTERVAL_US, true, 0);
+
+    clearBuffer();
+    drawTextAt(20, "WIFI...");
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+        delay(1000);
+        ESP.restart(); 
+    }
+
+    String ipStr = "IP: " + WiFi.localIP().toString();
+    ipStr.toCharArray(ipString, 30);
+
+    // --- TIME CONFIGURATION ---
+    // Force ESP32 to only hit the NTP server every 12 hours.
+    sntp_set_sync_interval(12 * 60 * 60 * 1000); 
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+    ArduinoOTA.setHostname("MatrixDisplay");
+    ArduinoOTA.begin();
 }
 
 // ==========================================
-// 8. MAIN LOOP (STATE MACHINE)
+// 9. MAIN LOOP (STATE MACHINE)
 // ==========================================
 enum AppState {
+    STATE_BOOT_IP,
+    STATE_CLOCK,
     STATE_TYPEWRITER,
     STATE_SPARKLE,
     STATE_SCANNER,
@@ -421,17 +664,47 @@ enum AppState {
     STATE_SCROLL
 };
 
-AppState currentState = STATE_TYPEWRITER;
+AppState currentState = STATE_BOOT_IP;
 bool initNextAnim = true;
 
 void loop() {
+    ArduinoOTA.handle();
+
     switch (currentState) {
-        case STATE_TYPEWRITER:
+        case STATE_BOOT_IP:
             if (initNextAnim) { 
-                animTypewriter("ESP32 OK   HOW ARE  YOU?", true); 
+                animScroll(ipString, true); 
                 initNextAnim = false; 
             }
-            if (animTypewriter("ESP32 OK   HOW ARE  YOU?")) {
+            if (animScroll(ipString)) {
+                // Fetch first weather update before starting the clock
+                if (millis() - lastWeatherUpdate >= weatherUpdateInterval || lastWeatherUpdate == 0) {
+                    fetchWeather();
+                    lastWeatherUpdate = millis();
+                }
+                currentState = STATE_CLOCK;
+                initNextAnim = true;
+            }
+            break;
+
+        case STATE_CLOCK:
+            if (initNextAnim) { 
+                // Pass in the live global string!
+                animTimeWeather(15000, liveWeatherString, true); 
+                initNextAnim = false; 
+            }
+            if (animTimeWeather(15000, liveWeatherString)) {
+                currentState = STATE_TYPEWRITER;
+                initNextAnim = true;
+            }
+            break;
+
+        case STATE_TYPEWRITER:
+            if (initNextAnim) { 
+                animTypewriter("ESP32 OK", true); 
+                initNextAnim = false; 
+            }
+            if (animTypewriter("ESP32 OK")) {
                 currentState = STATE_SPARKLE;
                 initNextAnim = true;
             }
@@ -472,16 +745,18 @@ void loop() {
 
         case STATE_SCROLL:
             if (initNextAnim) { 
-                animScroll("DUAL SCREEN CONFIGURATION... GAPS ENABLED... RUNNING ON RISC-V...", true); 
+                animScroll("DUAL SCREEN CONFIGURATION...", true); 
                 initNextAnim = false; 
             }
-            if (animScroll("DUAL SCREEN CONFIGURATION... GAPS ENABLED... RUNNING ON RISC-V...")) {
-                currentState = STATE_TYPEWRITER; // Loop back to start
+            if (animScroll("DUAL SCREEN CONFIGURATION...")) {
+                // Fetch background weather before returning to the clock
+                if (millis() - lastWeatherUpdate >= weatherUpdateInterval || lastWeatherUpdate == 0) {
+                    fetchWeather();
+                    lastWeatherUpdate = millis();
+                }
+                currentState = STATE_CLOCK; 
                 initNextAnim = true;
             }
             break;
     }
-    
-    // You can now run other non-blocking tasks here! 
-    // e.g., check WiFi, read sensors, update weather data.
 }
