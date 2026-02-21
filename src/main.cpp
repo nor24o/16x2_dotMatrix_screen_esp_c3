@@ -177,49 +177,162 @@ void drawTextAt(int x, const char* msg) {
 }
 
 // ==========================================
-// 6. ANIMATIONS
+// 6. NON-BLOCKING ANIMATIONS
+// Each returns 'true' when the animation is fully complete.
+// Pass 'true' to the 'init' parameter to reset their internal state.
 // ==========================================
-void animSparkle(int speed) {
-    for (int i = 0; i < 800; i++) {
+
+bool animSparkle(int speed, bool init = false) {
+    static unsigned long prevMillis = 0;
+    static int count = 0;
+
+    if (init) {
+        count = 0;
+        prevMillis = millis();
+        return false;
+    }
+
+    if (millis() - prevMillis >= speed) {
+        prevMillis = millis();
         setPixel(random(0, VIRTUAL_COLS), random(0, ROWS), 0);
-        delay(speed);
-    }
-    clearBuffer();
-}
-void animScanner(int loops) {
-    for(int l=0; l<loops; l++) {
-        for(int i=0; i<VIRTUAL_COLS-4; i+=2) {
+        count++;
+
+        if (count >= 800) {
             clearBuffer();
-            for(int w=0; w<4; w++) for(int h=0; h<8; h++) setPixel(i+w, h, 1);
-            delay(5);
-        }
-        for(int i=VIRTUAL_COLS-4; i>0; i-=2) {
-            clearBuffer();
-            for(int w=0; w<4; w++) for(int h=0; h<8; h++) setPixel(i+w, h, 1);
-            delay(5);
+            return true; // Done
         }
     }
+    return false;
 }
-void animScroll(const char* txt) {
+
+bool animScanner(int loops, bool init = false) {
+    static unsigned long prevMillis = 0;
+    static int currentLoop = 0;
+    static int i = 0;
+    static int dir = 1; // 1 for right, -1 for left
+
+    if (init) {
+        currentLoop = 0;
+        i = 0;
+        dir = 1;
+        prevMillis = millis();
+        return false;
+    }
+
+    if (millis() - prevMillis >= 5) {
+        prevMillis = millis();
+        clearBuffer();
+        for(int w=0; w<4; w++) {
+            for(int h=0; h<8; h++) {
+                setPixel(i+w, h, 1);
+            }
+        }
+
+        i += (dir * 2);
+
+        // Turn around logic
+        if (dir == 1 && i >= VIRTUAL_COLS - 4) {
+            dir = -1;
+            i = VIRTUAL_COLS - 4; // Clamp
+        } else if (dir == -1 && i <= 0) {
+            dir = 1;
+            i = 0;
+            currentLoop++;
+
+            if (currentLoop >= loops) {
+                clearBuffer();
+                return true; // Done
+            }
+        }
+    }
+    return false;
+}
+
+bool animScroll(const char* txt, bool init = false) {
+    static unsigned long prevMillis = 0;
+    static int x = 0;
     int len = strlen(txt);
-    for(int x=VIRTUAL_COLS; x>-(len*6); x--) {
+
+    if (init) {
+        x = VIRTUAL_COLS;
+        prevMillis = millis();
+        return false;
+    }
+
+    if (millis() - prevMillis >= 20) {
+        prevMillis = millis();
         clearBuffer();
         drawTextAt(x, txt);
-        delay(20);
+        x--;
+
+        if (x <= -(len * 6)) {
+            return true; // Done
+        }
     }
+    return false;
 }
-void animTypewriter(const char* msg) {
-    clearBuffer();
+
+bool animTypewriter(const char* msg, bool init = false) {
+    static unsigned long prevMillis = 0;
+    static int charIndex = 0;
+    static bool isWaiting = false;
     int len = strlen(msg);
-    int startX = (len * 6 < VIRTUAL_COLS) ? (VIRTUAL_COLS - (len * 6)) / 2 : 0;
-    //startX =startX-70;
-    char buf[2] = {0};
-    for(int i=0; i<len; i++) {
-        buf[0] = msg[i];
-        drawTextAt(startX + (i*6), buf);
-        delay(80);
+
+    if (init) {
+        clearBuffer();
+        charIndex = 0;
+        isWaiting = false;
+        prevMillis = millis();
+        return false;
     }
-    delay(3000);
+
+    if (isWaiting) {
+        // Wait 3 seconds at the end
+        if (millis() - prevMillis >= 3000) {
+            return true; // Done
+        }
+    } else {
+        if (millis() - prevMillis >= 80) {
+            prevMillis = millis();
+            int startX = (len * 6 < VIRTUAL_COLS) ? (VIRTUAL_COLS - (len * 6)) / 2 : 0;
+            
+            char buf[2] = {msg[charIndex], '\0'};
+            drawTextAt(startX + (charIndex * 6), buf);
+            
+            charIndex++;
+            if (charIndex >= len) {
+                isWaiting = true; 
+            }
+        }
+    }
+    return false;
+}
+
+bool displayStaticScreen(bool init = false) {
+    static unsigned long prevMillis = 0;
+
+    if (init) {
+        clearBuffer();
+        // -- Screen 0 (Left) --
+        drawTemp(0, 0, 24.5);             
+        drawIcon(0, 5, ICON_SUN_MOD);     
+        drawTemp(0, 9, 18.2);             
+        drawIcon(0, 14, ICON_CLOUD_MOD);
+
+        // -- Screen 1 (Right) --
+        drawTemp(1, 0, 12.0);
+        drawIcon(1, 5, ICON_RAIN_MOD);
+        drawTemp(1, 9, -5.5);
+        drawIcon(1, 14, ICON_THUNDER_MOD);
+        
+        prevMillis = millis();
+        return false;
+    }
+
+    if (millis() - prevMillis >= 5000) {
+        return true; // Done waiting 5 seconds
+    }
+    return false;
 }
 
 // ==========================================
@@ -242,7 +355,6 @@ void IRAM_ATTR onTimer() {
     for(volatile int k=0; k<5; k++) __asm__("nop");
 
     // 3. Shift Out Data
-    // FIXED: Original loop order (0 to End) so text is NOT backwards
     for (int8_t b = 0; b < BUFFER_BYTES; b++) {
         uint8_t data = displayBuffer[currentRow][b];
         for (int8_t i = 0; i < 8; i++) {
@@ -299,35 +411,77 @@ void setup() {
 }
 
 // ==========================================
-// 8. MAIN LOOP
+// 8. MAIN LOOP (STATE MACHINE)
 // ==========================================
+enum AppState {
+    STATE_TYPEWRITER,
+    STATE_SPARKLE,
+    STATE_SCANNER,
+    STATE_STATIC,
+    STATE_SCROLL
+};
+
+AppState currentState = STATE_TYPEWRITER;
+bool initNextAnim = true;
+
 void loop() {
-    // 1. Text Animation
-    animTypewriter("ESP32 OK     HOW ARE  YOU?");
-    animSparkle(2);
+    switch (currentState) {
+        case STATE_TYPEWRITER:
+            if (initNextAnim) { 
+                animTypewriter("ESP32 OK   HOW ARE  YOU?", true); 
+                initNextAnim = false; 
+            }
+            if (animTypewriter("ESP32 OK   HOW ARE  YOU?")) {
+                currentState = STATE_SPARKLE;
+                initNextAnim = true;
+            }
+            break;
 
-    // 2. Scanner
-    animScanner(2);
+        case STATE_SPARKLE:
+            if (initNextAnim) { 
+                animSparkle(2, true); 
+                initNextAnim = false; 
+            }
+            if (animSparkle(2)) {
+                currentState = STATE_SCANNER;
+                initNextAnim = true;
+            }
+            break;
 
-    // 3. SEPARATE SCREENS MODE
-    clearBuffer();
+        case STATE_SCANNER:
+            if (initNextAnim) { 
+                animScanner(2, true); 
+                initNextAnim = false; 
+            }
+            if (animScanner(2)) {
+                currentState = STATE_STATIC;
+                initNextAnim = true;
+            }
+            break;
+
+        case STATE_STATIC:
+            if (initNextAnim) { 
+                displayStaticScreen(true); 
+                initNextAnim = false; 
+            }
+            if (displayStaticScreen()) {
+                currentState = STATE_SCROLL;
+                initNextAnim = true;
+            }
+            break;
+
+        case STATE_SCROLL:
+            if (initNextAnim) { 
+                animScroll("DUAL SCREEN CONFIGURATION... GAPS ENABLED... RUNNING ON RISC-V...", true); 
+                initNextAnim = false; 
+            }
+            if (animScroll("DUAL SCREEN CONFIGURATION... GAPS ENABLED... RUNNING ON RISC-V...")) {
+                currentState = STATE_TYPEWRITER; // Loop back to start
+                initNextAnim = true;
+            }
+            break;
+    }
     
-    // -- Screen 0 (Left) --
-    drawTemp(0, 0, 24.5);             
-    drawIcon(0, 5, ICON_SUN_MOD);     
-    drawTemp(0, 9, 18.2);             
-    drawIcon(0, 14, ICON_CLOUD_MOD);
-
-    // -- Screen 1 (Right) --
-    drawTemp(1, 0, 12.0);
-    drawIcon(1, 5, ICON_RAIN_MOD);
-    
-    drawTemp(1, 9, -5.5);
-    drawIcon(1, 14, ICON_THUNDER_MOD);
-    
-
-    delay(5000);
-
-    // 4. Scrolling News
-    animScroll("DUAL SCREEN CONFIGURATION... GAPS ENABLED... RUNNING ON RISC-V...");
+    // You can now run other non-blocking tasks here! 
+    // e.g., check WiFi, read sensors, update weather data.
 }
