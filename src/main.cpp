@@ -46,13 +46,13 @@ String targetCityName = "Sauca";
 String targetCountryCode = "RO";
 String targetRegion = "Satu Mare";
 
-float externalTemps[4] = {-999.0, -999.0, -999.0, -999.0};
+float externalTemps[4] = {-999.0, -99.0, -999.0, -999.0};
 
 // --- PLAYLIST TOGGLES ---
 bool showClock = true;
-bool showTypewriter = true;
-bool showSparkle = true;
-bool showScanner = true;
+bool showTypewriter = false;
+bool showSparkle = false;
+bool showScanner = false;
 bool showTemps = true;
 bool showMsg = false;
 String customMessage = "HELLO";
@@ -245,6 +245,13 @@ void drawModuleChar(uint8_t screen, uint8_t mod, char c)
     setPixel(startX + 3, 6, 1);
     return;
   }
+  if (c == '-')
+  {
+    setPixel(startX + 1, 4, 1);
+    setPixel(startX + 2, 4, 1);
+    setPixel(startX + 3, 4, 1);
+    return;
+  }
   uint8_t idx = getCharIdxText(c);
   if (idx == 0 && c != ' ')
     return;
@@ -331,6 +338,12 @@ void drawTextAt(int x, const char *msg)
       setPixel(x + 2, 2, 1);
       setPixel(x + 2, 5, 1);
     }
+    else if (c == '-')
+    {
+      setPixel(x + 1, 4, 1);
+      setPixel(x + 2, 4, 1);
+      setPixel(x + 3, 4, 1);
+    }
     else
     {
       uint8_t idx = getCharIdxText(c);
@@ -401,7 +414,7 @@ const char *getShortWeatherCondition(int code)
   if (code == 1 || code == 2)
     return "P.CLD";
   if (code == 3)
-    return "OVCST";
+    return "OCST";
   if (code >= 45 && code <= 48)
     return "FOG";
   if (code >= 51 && code <= 67)
@@ -491,14 +504,14 @@ void fetchWeather()
             DeserializationError weatherError = deserializeJson(weatherDoc, weatherPayload);
             if (!weatherError)
             {
-              float temp = weatherDoc["current"]["temperature_2m"];
+              float temp = externalTemps[1];//weatherDoc["current"]["temperature_2m"];
               int hum = weatherDoc["current"]["relative_humidity_2m"];
               int wmoCode = weatherDoc["current"]["weather_code"];
               const char *condition = getWeatherCondition(wmoCode);
               sprintf(liveWeatherString, "%s: %s %dC   HUMIDITY %d%%   ", officialName.c_str(), condition, (int)round(temp), hum);
               String shortName = officialName.substring(0, 2);
               const char *shortCond = getShortWeatherCondition(wmoCode);
-              sprintf(nightWeatherString, "%s:%s T%dC H%d%%", shortName.c_str(), shortCond, (int)round(temp), hum);
+              sprintf(nightWeatherString, "%s:%s T%.1fC", shortName.c_str(), shortCond, temp);
             }
           }
           http.end();
@@ -648,6 +661,27 @@ void handleUDP()
         if (!doc["t2"].isNull()) externalTemps[1] = constrain(doc["t2"].as<float>(), -99.9, 99.9);
         if (!doc["t3"].isNull()) externalTemps[2] = constrain(doc["t3"].as<float>(), -99.9, 99.9);
         if (!doc["t4"].isNull()) externalTemps[3] = constrain(doc["t4"].as<float>(), -99.9, 99.9);
+
+
+
+        // 2. Update the night string (e.g., "SA:CLR T23.4C") - No humidity
+        String nStr = nightWeatherString;
+        int tIdx = nStr.indexOf(" T");
+        if (tIdx != -1) {
+          String newN = nStr.substring(0, tIdx + 2) + String(externalTemps[1], 1) + "C";
+          newN.toCharArray(nightWeatherString, 50);
+        }
+
+        // 3. Update the live daytime string (Keeps the humidity intact)
+        String lStr = liveWeatherString;
+        int cIdx2 = lStr.indexOf("C   HUMIDITY");
+        if (cIdx2 != -1) {
+          int spaceIdx = lStr.lastIndexOf(" ", cIdx2); 
+          if (spaceIdx != -1) {
+            String newL = lStr.substring(0, spaceIdx + 1) + String(externalTemps[1], 1) + lStr.substring(cIdx2);
+            newL.toCharArray(liveWeatherString, 100);
+          }
+        }
 
         currentState = STATE_WIPE_TO_TEMPS;
         initNextAnim = true;
@@ -819,6 +853,16 @@ bool animTimeWeather(int durationMs, const char *weatherMsg, bool init = false)
           {
             setPixel(vx + 1, 7, 1);
             setPixel(vx + 2, 7, 1);
+          }
+        }
+        else if (c == '-')
+        {
+          int vx = x;
+          if (vx >= screen1Start && vx < VIRTUAL_COLS)
+          {
+            setPixel(vx + 1, 4, 1);
+            setPixel(vx + 2, 4, 1);
+            setPixel(vx + 3, 4, 1);
           }
         }
         else
@@ -1262,6 +1306,7 @@ void setup()
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   ArduinoOTA.setHostname("matrix");
+  ArduinoOTA.setPassword("admin");
   ArduinoOTA.begin();
 
   xTaskCreate(displayRefreshTask, "DisplayTask", 4096, NULL, 5, &displayTaskHandle);
