@@ -54,6 +54,8 @@ String targetCountryCode = "RO";
 String targetRegion = "Satu Mare";
 
 float externalTemps[4] = {-999.0, -99.0, -999.0, -999.0};
+float internetTemp = -999.0;           // Stores the temperature fetched from the internet
+unsigned long lastLocalTempUpdate = 0; // Tracks the last time we got local UDP data
 
 bool showClock = true;
 bool showTypewriter = false;
@@ -532,7 +534,16 @@ void fetchWeather()
             DeserializationError weatherError = deserializeJson(weatherDoc, weatherPayload);
             if (!weatherError)
             {
-              float temp = externalTemps[1];
+              // Actually grab the internet temperature from the JSON
+              internetTemp = weatherDoc["current"]["temperature_2m"];
+
+              // Use local temp for the weather scroll IF it's fresh and valid; otherwise fallback to internet
+              float temp = internetTemp;
+              if (lastLocalTempUpdate != 0 && (millis() - lastLocalTempUpdate < 300000) && externalTemps[1] < 99.0)
+              {
+                temp = externalTemps[1];
+              }
+
               int hum = weatherDoc["current"]["relative_humidity_2m"];
               int wmoCode = weatherDoc["current"]["weather_code"];
               const char *condition = getWeatherCondition(wmoCode);
@@ -730,6 +741,8 @@ void handleUDP()
       }
       else if (cmd && strcmp(cmd, "temps") == 0)
       {
+        lastLocalTempUpdate = millis();
+
         if (!doc["t1"].isNull())
           externalTemps[0] = constrain(doc["t1"].as<float>(), -99.9, 99.9);
         if (!doc["t2"].isNull())
@@ -1043,8 +1056,20 @@ bool displayExternalTemps(int durationMs, bool init = false)
   {
     clearAnimZone();
 
-    float tA = alternateBlock ? ((externalTemps[2] != -999.0) ? externalTemps[2] : 12.0) : ((externalTemps[0] != -999.0) ? externalTemps[0] : 24.5);
-    float tB = alternateBlock ? ((externalTemps[3] != -999.0) ? externalTemps[3] : -5.5) : ((externalTemps[1] != -999.0) ? externalTemps[1] : 18.2);
+    // Check if 5 minutes (300,000 ms) have passed, or if we never got data
+    bool isStale = (lastLocalTempUpdate == 0) || (millis() - lastLocalTempUpdate > 300000);
+
+    // Helper function: If stale or sensor reading is an error (>= 99), return internet temp
+    auto getValidTemp = [&](float localT) {
+      if (isStale || localT >= 99.0 || localT <= -99.0) {
+        return internetTemp; 
+      }
+      return localT;
+    };
+
+    // Apply the fallback logic to whichever sensors are currently being displayed
+    float tA = alternateBlock ? getValidTemp(externalTemps[2]) : getValidTemp(externalTemps[0]);
+    float tB = alternateBlock ? getValidTemp(externalTemps[3]) : getValidTemp(externalTemps[1]);
 
     drawTemp(1, 0, tA); // Drawing to relative Module 0 on lower array
     drawIcon(1, 5, alternateBlock ? ICON_RAIN_MOD : ICON_SUN_MOD);
