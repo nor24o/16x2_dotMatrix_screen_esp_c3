@@ -9,6 +9,7 @@
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <Preferences.h>
+#include <SPI.h>
 
 // ==========================================
 // 1. CONFIGURATION, TIMING & STATE
@@ -85,11 +86,11 @@ bool initNextAnim = true;
 // 2. PIN DEFINITIONS & REG DIRECT ACCESS MACROS
 // ==========================================
 #define DATA_PIN 4
-#define CLK_PIN 21
+#define CLK_PIN 6
 #define STR_PIN 3
 #define OE_PIN 7
 #define ADDR_A 2
-#define ADDR_B 6
+#define ADDR_B 21
 #define ADDR_C 0
 #define G1_BLANK 5
 
@@ -134,6 +135,11 @@ volatile uint8_t displayBuffer[ROWS][BUFFER_BYTES];
 hw_timer_t *timer = NULL;
 TaskHandle_t displayTaskHandle = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Hardware SPI drives DATA/CLK for the shift registers instead of bit-banged
+// GPIO. ESP32-C3 only exposes one general-purpose SPI controller (FSPI).
+SPIClass dispSPI(FSPI);
+const uint32_t MATRIX_SPI_HZ = 4000000; // raise if signal integrity allows
 
 // ==========================================
 // 4. FONTS
@@ -1136,28 +1142,27 @@ void IRAM_ATTR onTimer()
 void displayRefreshTask(void *pvParameters)
 {
   uint8_t currentRow = 0;
+  uint8_t rowBuf[BUFFER_BYTES];
+  SPISettings matrixSPISettings(MATRIX_SPI_HZ, SPI_LSBFIRST, SPI_MODE0);
+
   for (;;)
   {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    portENTER_CRITICAL(&timerMux);
-    OE_HIGH();
 
-    for (int b = 0; b < BUFFER_BYTES; b++)
-    {
-      uint8_t data = displayBuffer[currentRow][b];
-      for (int i = 0; i < 8; i++)
-      {
-        CLK_LOW();
-        if (data & 1)
-          DATA_HIGH();
-        else
-          DATA_LOW();
-        data >>= 1;
-        asm volatile("nop");
-        CLK_HIGH();
-        asm volatile("nop");
-      }
-    }
+    // Only the buffer snapshot needs interrupts disabled - a handful of
+    // instructions instead of the ~1ms+ this used to hold the CPU for.
+    portENTER_CRITICAL(&timerMux);
+    memcpy(rowBuf, (void *)displayBuffer[currentRow], BUFFER_BYTES);
+    portEXIT_CRITICAL(&timerMux);
+
+    OE_HIGH(); // blank while shifting/latching to avoid ghosting/streaking
+
+    // Hardware-shifted: the SPI peripheral clocks these bytes out on its own,
+    // so a WiFi interrupt landing mid-transfer just adds a few us of latency
+    // instead of corrupting/stretching a bit-banged clock pulse.
+    dispSPI.beginTransaction(matrixSPISettings);
+    dispSPI.transfer(rowBuf, BUFFER_BYTES);
+    dispSPI.endTransaction();
 
     uint8_t addr = 7 - currentRow;
     if (addr & 0x01)
@@ -1185,7 +1190,6 @@ void displayRefreshTask(void *pvParameters)
       delayMicroseconds(currentBrightness);
       OE_HIGH();
     }
-    portEXIT_CRITICAL(&timerMux);
     currentRow = (currentRow + 1) & 0x07;
   }
 }
@@ -1227,14 +1231,16 @@ void setup()
 
   currentBrightness = BRIGHTNESS;
 
-  pinMode(DATA_PIN, OUTPUT);
-  pinMode(CLK_PIN, OUTPUT);
   pinMode(STR_PIN, OUTPUT);
   pinMode(OE_PIN, OUTPUT);
   pinMode(ADDR_A, OUTPUT);
   pinMode(ADDR_B, OUTPUT);
   pinMode(ADDR_C, OUTPUT);
   pinMode(G1_BLANK, OUTPUT);
+
+  // DATA_PIN/CLK_PIN are now driven by hardware SPI (MOSI/SCK), not GPIO.
+  // ESP32-C3's GPIO matrix lets any pin map to these regardless of number.
+  dispSPI.begin(CLK_PIN, -1 /* MISO unused */, DATA_PIN, -1 /* CS unused */);
 
   OE_HIGH();
   BLANK_HIGH();
@@ -1262,8 +1268,12 @@ void setup()
   ArduinoOTA.setPassword("admin");
   ArduinoOTA.begin();
 
-  // Create standard vanilla FreeRTOS task with high priority (5) to run cooperatively on Core 0
-  xTaskCreate(displayRefreshTask, "DisplayTask", 4096, NULL, 5, &displayTaskHandle);
+  // Priority 24: must sit ABOVE the ESP-IDF WiFi task (~23) or the timer ISR's
+  // wakeup can't actually preempt WiFi packet processing, which is what causes
+  // irregular/jittery row timing on a single-core chip. This task blocks on
+  // ulTaskNotifyTake almost the entire 1500us window, so it doesn't starve
+  // WiFi/idle - it just gets first refusal on the CPU when its tick is due.
+  xTaskCreate(displayRefreshTask, "DisplayTask", 4096, NULL, 24, &displayTaskHandle);
 
   timer = timerBegin(1000000);
   timerAttachInterrupt(timer, &onTimer);
