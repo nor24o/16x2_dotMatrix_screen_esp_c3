@@ -129,6 +129,8 @@ void matrix_draw_char(uint8_t screen, uint8_t mod, char c) {
     int totalModIdx = (screen * MODS_PER_SCREEN) + mod;
     int startX = totalModIdx * VIRTUAL_MOD_WIDTH;
 
+    if (c == ' ') return; // Space = blank
+
     if (c >= 'a' && c <= 'z') c -= 32;
 
     if (c == ':') {
@@ -151,7 +153,7 @@ void matrix_draw_char(uint8_t screen, uint8_t mod, char c) {
     }
 
     uint8_t idx = get_char_index(c);
-    if (idx == 0 && c != ' ') return;
+    if (idx == 0) return;
     for (int col = 0; col < 5; col++) {
         uint8_t data = FONT_TEXT[idx][col];
         for (int r = 0; r < 8; r++) {
@@ -215,7 +217,7 @@ static void display_refresh_task(void *pvParameters) {
         portENTER_CRITICAL(&s_mux);
         OE_HIGH(); // 0. Blank LEDs before row switch
 
-        // 1. Shift all 20 bytes (160 physical bits)
+        // 1. Shift all 20 bytes (160 physical bits) with clean 500kHz timing
         for (int b = 0; b < BUFFER_BYTES; b++) {
             uint8_t data = displayBuffer[currentRow][b];
             for (int i = 0; i < 8; i++) {
@@ -226,11 +228,12 @@ static void display_refresh_task(void *pvParameters) {
                     DATA_LOW();
                 }
                 data >>= 1;
-                asm volatile("nop");
+                esp_rom_delay_us(1); // Clean clock setup delay
                 CLK_HIGH();
-                asm volatile("nop");
+                esp_rom_delay_us(1); // Clean clock pulse width
             }
         }
+        CLK_LOW();
 
         // 2. Select Row Address (3-to-8 decoder)
         uint8_t addr = 7 - currentRow;
@@ -240,14 +243,14 @@ static void display_refresh_task(void *pvParameters) {
 
         // 3. Strobe Latch
         STR_HIGH();
-        asm volatile("nop; nop; nop; nop;");
+        esp_rom_delay_us(2);
         STR_LOW();
         esp_rom_delay_us(2);
 
         // 4. Illuminate for brightness duration
         int pulse = s_brightness_us;
-        if (pulse > (REFRESH_INTERVAL_US - 200)) {
-            pulse = REFRESH_INTERVAL_US - 200;
+        if (pulse > (REFRESH_INTERVAL_US - 300)) {
+            pulse = REFRESH_INTERVAL_US - 300;
         }
 
         if (pulse > 0) {
@@ -273,16 +276,24 @@ static void IRAM_ATTR timer_callback(void* arg) {
 void matrix_init(void) {
     ESP_LOGI(TAG, "Initializing Matrix Display (32 modules, 20 bytes/row)...");
 
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << PIN_DATA) | (1ULL << PIN_CLK) | (1ULL << PIN_STR) |
-                        (1ULL << PIN_OE) | (1ULL << PIN_ADDR_A) | (1ULL << PIN_ADDR_B) |
-                        (1ULL << PIN_ADDR_C) | (1ULL << PIN_BLANK),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
+    // Explicitly reset all pins from peripheral muxes (e.g. UART0 on GPIO 21)
+    gpio_reset_pin(PIN_DATA);
+    gpio_reset_pin(PIN_CLK);
+    gpio_reset_pin(PIN_STR);
+    gpio_reset_pin(PIN_OE);
+    gpio_reset_pin(PIN_ADDR_A);
+    gpio_reset_pin(PIN_ADDR_B);
+    gpio_reset_pin(PIN_ADDR_C);
+    gpio_reset_pin(PIN_BLANK);
+
+    gpio_set_direction(PIN_DATA, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_CLK, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_STR, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_OE, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_ADDR_A, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_ADDR_B, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_ADDR_C, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_BLANK, GPIO_MODE_OUTPUT);
 
     OE_HIGH();
     BLANK_HIGH();
