@@ -20,13 +20,13 @@ extern "C" {
 #define VIRTUAL_MOD_WIDTH   (MODULE_WIDTH + GAP_WIDTH)  // 6
 #define VIRTUAL_COLS        (TOTAL_MODULES * VIRTUAL_MOD_WIDTH) // 192
 
-// Pin definitions
+// Pin definitions (matched to hardware wiring from backup firmware)
 #define PIN_DATA     4
-#define PIN_CLK      21
+#define PIN_CLK      6
 #define PIN_STR      3
 #define PIN_OE       7
 #define PIN_ADDR_A   2
-#define PIN_ADDR_B   6
+#define PIN_ADDR_B   21
 #define PIN_ADDR_C   0
 #define PIN_BLANK    5
 

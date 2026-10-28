@@ -213,7 +213,7 @@ static void IRAM_ATTR timer_callback(void* arg) {
     // 0. Blank LEDs during latch & row switch
     OE_HIGH();
 
-    // 1. Shift all 20 bytes (160 physical bits)
+    // 1. Shift all 20 bytes (160 physical bits, LSB first, ~4 MHz clock)
     for (int b = 0; b < BUFFER_BYTES; b++) {
         uint8_t data = displayBuffer[currentRow][b];
         for (int i = 0; i < 8; i++) {
@@ -224,9 +224,9 @@ static void IRAM_ATTR timer_callback(void* arg) {
                 DATA_LOW();
             }
             data >>= 1;
-            for (volatile int k = 0; k < 12; k++) __asm__("nop"); // ~80ns setup
+            for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns setup (4 MHz)
             CLK_HIGH();
-            for (volatile int k = 0; k < 12; k++) __asm__("nop"); // ~80ns hold
+            for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns hold  (4 MHz)
         }
     }
     CLK_LOW();
@@ -239,9 +239,12 @@ static void IRAM_ATTR timer_callback(void* arg) {
 
     // 3. Strobe Latch
     STR_HIGH();
-    for (volatile int k = 0; k < 16; k++) __asm__("nop");
+    __asm__("nop");
+    __asm__("nop");
+    __asm__("nop");
+    __asm__("nop");
     STR_LOW();
-    for (volatile int k = 0; k < 16; k++) __asm__("nop");
+    esp_rom_delay_us(2);
 
     // 4. Illuminate for brightness duration
     int pulse = s_brightness_us;
