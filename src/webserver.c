@@ -78,7 +78,7 @@ static const char INDEX_HTML[] =
 "        <span>Level</span>"
 "        <span id='brightVal'>--%</span>"
 "      </div>"
-"      <input type='range' id='brightness' min='10' max='1300' step='10' oninput='onBrightnessSlide()' onchange='onSettingChange()'>"
+"      <input type='range' id='brightness' min='10' max='450' step='10' oninput='onBrightnessSlide()' onchange='onSettingChange()'>"
 "    </div>"
 "    <div id='toast'></div>"
 "  </div>"
@@ -103,7 +103,7 @@ static const char INDEX_HTML[] =
 "          document.getElementById('fliph').checked = d.fliph;"
 "          document.getElementById('flipv').checked = d.flipv;"
 "          document.getElementById('brightness').value = d.brightness;"
-"          document.getElementById('brightVal').innerText = Math.round((d.brightness / 1300) * 100) + '%';"
+"          document.getElementById('brightVal').innerText = Math.round((d.brightness / 450) * 100) + '%';"
 "          if (d.time) document.getElementById('clockDisplay').innerText = d.time;"
 "          if (autoSyncTime) syncBrowserTime(true);"
 "        })"
@@ -119,7 +119,7 @@ static const char INDEX_HTML[] =
 "    }"
 "    function onBrightnessSlide() {"
 "      const val = document.getElementById('brightness').value;"
-"      document.getElementById('brightVal').innerText = Math.round((val / 1300) * 100) + '%';"
+"      document.getElementById('brightVal').innerText = Math.round((val / 450) * 100) + '%';"
 "      clearTimeout(sendTimeout);"
 "      sendTimeout = setTimeout(onSettingChange, 120);"
 "    }"
@@ -181,7 +181,16 @@ static const char INDEX_HTML[] =
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t captive_redirect_handler(httpd_req_t *req) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
 }
 
 static esp_err_t settings_get_handler(httpd_req_t *req) {
@@ -307,12 +316,22 @@ static esp_err_t sync_post_handler(httpd_req_t *req) {
 }
 
 esp_err_t webserver_start(void) {
+    if (s_server != NULL) {
+        return ESP_OK;
+    }
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
+    config.server_port = 80;
+    config.task_priority = 6;
+    config.max_open_sockets = 4;
+    config.max_uri_handlers = 16;
+    config.backlog_conn = 4;
+    config.lru_purge_enable = true;
     config.stack_size = 8192;
 
     ESP_LOGI(TAG, "Starting HTTP Server on port %d...", config.server_port);
-    if (httpd_start(&s_server, &config) == ESP_OK) {
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err == ESP_OK) {
         httpd_uri_t root_uri = {
             .uri = "/",
             .method = HTTP_GET,
@@ -320,6 +339,14 @@ esp_err_t webserver_start(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(s_server, &root_uri);
+
+        httpd_uri_t index_uri = {
+            .uri = "/index.html",
+            .method = HTTP_GET,
+            .handler = root_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &index_uri);
 
         httpd_uri_t settings_get_uri = {
             .uri = "/api/settings",
@@ -361,11 +388,44 @@ esp_err_t webserver_start(void) {
         };
         httpd_register_uri_handler(s_server, &sync_uri);
 
-        ESP_LOGI(TAG, "HTTP Server started successfully.");
+        // Captive portal probe handlers
+        httpd_uri_t gen204_uri = {
+            .uri = "/generate_204",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &gen204_uri);
+
+        httpd_uri_t hotspot_uri = {
+            .uri = "/hotspot-detect.html",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &hotspot_uri);
+
+        httpd_uri_t ncsi_uri = {
+            .uri = "/ncsi.txt",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &ncsi_uri);
+
+        httpd_uri_t connect_uri = {
+            .uri = "/connecttest.txt",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &connect_uri);
+
+        ESP_LOGI(TAG, "HTTP Server started successfully with captive portal handlers.");
         return ESP_OK;
     }
-    ESP_LOGE(TAG, "Failed to start HTTP server!");
-    return ESP_FAIL;
+    ESP_LOGE(TAG, "Failed to start HTTP server: 0x%x (%s)", err, esp_err_to_name(err));
+    return err;
 }
 
 void webserver_stop(void) {

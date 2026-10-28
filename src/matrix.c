@@ -33,6 +33,7 @@ static const char *TAG = "MATRIX";
 static uint8_t drawBuffer[MATRIX_ROWS][BUFFER_BYTES];
 static volatile uint8_t displayBuffer[MATRIX_ROWS][BUFFER_BYTES];
 
+static TaskHandle_t s_display_task_handle = NULL;
 static esp_timer_handle_t s_display_timer = NULL;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -196,7 +197,7 @@ void matrix_get_flip(bool *flip_h, bool *flip_v) {
 
 void matrix_set_brightness(int us) {
     if (us < 10) us = 10;
-    if (us > (REFRESH_INTERVAL_US - 200)) us = REFRESH_INTERVAL_US - 200;
+    if (us > 450) us = 450;
     s_brightness_us = us;
 }
 
@@ -205,60 +206,70 @@ int matrix_get_brightness(void) {
 }
 
 // -------------------------------------------------------------
-// Hardware Timer Display Refresh (Flicker-Free, Zero Latency)
+// FreeRTOS Display Multiplexer Task (Priority 4, Responsive to lwIP & HTTP)
 // -------------------------------------------------------------
-static void IRAM_ATTR timer_callback(void* arg) {
-    static uint8_t currentRow = 0;
+static void display_refresh_task(void *pvParameters) {
+    uint8_t currentRow = 0;
 
-    // 0. Blank LEDs during latch & row switch
-    OE_HIGH();
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    // 1. Shift all 20 bytes (160 physical bits, LSB first, ~4 MHz clock)
-    for (int b = 0; b < BUFFER_BYTES; b++) {
-        uint8_t data = displayBuffer[currentRow][b];
-        for (int i = 0; i < 8; i++) {
-            CLK_LOW();
-            if (data & 1) {
-                DATA_HIGH();
-            } else {
-                DATA_LOW();
-            }
-            data >>= 1;
-            for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns setup (4 MHz)
-            CLK_HIGH();
-            for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns hold  (4 MHz)
-        }
-    }
-    CLK_LOW();
-
-    // 2. Select Row Address (3-to-8 decoder)
-    uint8_t addr = 7 - currentRow;
-    if (addr & 0x01) ADDR_A_HIGH(); else ADDR_A_LOW();
-    if (addr & 0x02) ADDR_B_HIGH(); else ADDR_B_LOW();
-    if (addr & 0x04) ADDR_C_HIGH(); else ADDR_C_LOW();
-
-    // 3. Strobe Latch
-    STR_HIGH();
-    __asm__("nop");
-    __asm__("nop");
-    __asm__("nop");
-    __asm__("nop");
-    STR_LOW();
-    esp_rom_delay_us(2);
-
-    // 4. Illuminate for brightness duration
-    int pulse = s_brightness_us;
-    if (pulse > (REFRESH_INTERVAL_US - 200)) {
-        pulse = REFRESH_INTERVAL_US - 200;
-    }
-
-    if (pulse > 0) {
-        OE_LOW();
-        esp_rom_delay_us(pulse);
+        // 0. Blank LEDs during latch & row switch
         OE_HIGH();
-    }
 
-    currentRow = (currentRow + 1) & 0x07;
+        // 1. Shift all 20 bytes (160 physical bits, LSB first, ~4 MHz clock)
+        for (int b = 0; b < BUFFER_BYTES; b++) {
+            uint8_t data = displayBuffer[currentRow][b];
+            for (int i = 0; i < 8; i++) {
+                CLK_LOW();
+                if (data & 1) {
+                    DATA_HIGH();
+                } else {
+                    DATA_LOW();
+                }
+                data >>= 1;
+                for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns setup (4 MHz)
+                CLK_HIGH();
+                for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns hold  (4 MHz)
+            }
+        }
+        CLK_LOW();
+
+        // 2. Select Row Address (3-to-8 decoder)
+        uint8_t addr = 7 - currentRow;
+        if (addr & 0x01) ADDR_A_HIGH(); else ADDR_A_LOW();
+        if (addr & 0x02) ADDR_B_HIGH(); else ADDR_B_LOW();
+        if (addr & 0x04) ADDR_C_HIGH(); else ADDR_C_LOW();
+
+        // 3. Strobe Latch
+        STR_HIGH();
+        __asm__("nop");
+        __asm__("nop");
+        __asm__("nop");
+        __asm__("nop");
+        STR_LOW();
+        esp_rom_delay_us(2);
+
+        // 4. Illuminate for brightness duration (capped at 450us to preserve CPU for network)
+        int pulse = s_brightness_us;
+        if (pulse > 450) {
+            pulse = 450;
+        }
+
+        if (pulse > 0) {
+            OE_LOW();
+            esp_rom_delay_us(pulse);
+            OE_HIGH();
+        }
+
+        currentRow = (currentRow + 1) & 0x07;
+    }
+}
+
+static void IRAM_ATTR timer_callback(void* arg) {
+    if (s_display_task_handle != NULL) {
+        xTaskNotifyGive(s_display_task_handle);
+    }
 }
 
 void matrix_init(void) {
@@ -296,7 +307,10 @@ void matrix_init(void) {
     matrix_clear();
     matrix_show();
 
-    // 4. Start periodic hardware timer for display multiplexing
+    // 4. Create high-priority display task (Priority 4: runs smoothly, allows lwIP & HTTP to preempt)
+    xTaskCreate(display_refresh_task, "DispMuxTask", 4096, NULL, 4, &s_display_task_handle);
+
+    // 5. Start periodic hardware timer for display multiplexing ticks
     const esp_timer_create_args_t timer_args = {
         .callback = &timer_callback,
         .name = "disp_timer"
