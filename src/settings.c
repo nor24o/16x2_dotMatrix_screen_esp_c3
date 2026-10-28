@@ -30,7 +30,8 @@ app_settings_t g_cfg = {
     .show_msg = false,
     .custom_msg = "HELLO",
     .custom_msg_duration_ms = 10000,
-    .ext_temps = {24.5f, 18.2f, 12.0f, -5.5f}
+    .ext_temps = {24.5f, 18.2f, 12.0f, -5.5f},
+    .ext_temp_icons = {ICON_HOME, ICON_BED, ICON_TREE, ICON_WATER}
 };
 
 char g_ip_str[32] = "WAITING FOR IP...";
@@ -84,6 +85,11 @@ void settings_load_all(void) {
         nvs_get_str(h, "cMsg", g_cfg.custom_msg, &len);
         if (nvs_get_i32(h, "cMsgDur", &v32) == ESP_OK) g_cfg.custom_msg_duration_ms = v32;
 
+        if (nvs_get_u8(h, "iTmp0", &v8) == ESP_OK) g_cfg.ext_temp_icons[0] = (v8 < ICON_COUNT) ? v8 : 0;
+        if (nvs_get_u8(h, "iTmp1", &v8) == ESP_OK) g_cfg.ext_temp_icons[1] = (v8 < ICON_COUNT) ? v8 : 0;
+        if (nvs_get_u8(h, "iTmp2", &v8) == ESP_OK) g_cfg.ext_temp_icons[2] = (v8 < ICON_COUNT) ? v8 : 0;
+        if (nvs_get_u8(h, "iTmp3", &v8) == ESP_OK) g_cfg.ext_temp_icons[3] = (v8 < ICON_COUNT) ? v8 : 0;
+
         nvs_close(h);
         ESP_LOGI(TAG, "Loaded settings from NVS -> city=%s, bright=%d, nbright=%d", g_cfg.city, g_cfg.bright, g_cfg.nbright);
     } else {
@@ -126,6 +132,11 @@ void settings_save_all(void) {
         nvs_set_str(h, "cMsg", g_cfg.custom_msg);
         nvs_set_i32(h, "cMsgDur", g_cfg.custom_msg_duration_ms);
 
+        nvs_set_u8(h, "iTmp0", g_cfg.ext_temp_icons[0]);
+        nvs_set_u8(h, "iTmp1", g_cfg.ext_temp_icons[1]);
+        nvs_set_u8(h, "iTmp2", g_cfg.ext_temp_icons[2]);
+        nvs_set_u8(h, "iTmp3", g_cfg.ext_temp_icons[3]);
+
         nvs_commit(h);
         nvs_close(h);
         ESP_LOGI(TAG, "Saved all settings to NVS Flash.");
@@ -154,9 +165,9 @@ bool settings_is_night_time(void) {
     gmtime_r(&now, &ti);
 
     if (g_cfg.nstart > g_cfg.nend) {
-        if (ti.tm_hour >= g_cfg.nstart || ti.tm_hour < g_cfg.nend) return true;
+        return (ti.tm_hour >= g_cfg.nstart || ti.tm_hour < g_cfg.nend);
     } else if (g_cfg.nstart < g_cfg.nend) {
-        if (ti.tm_hour >= g_cfg.nstart && ti.tm_hour < g_cfg.nend) return true;
+        return (ti.tm_hour >= g_cfg.nstart && ti.tm_hour < g_cfg.nend);
     }
     return false;
 }

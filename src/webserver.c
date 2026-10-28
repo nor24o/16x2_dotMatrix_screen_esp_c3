@@ -124,18 +124,21 @@ static const char INDEX_HTML[] =
 "<div class='card'>"
 "<h2>External 4-Quadrant Temperatures (&deg;C)</h2>"
 "<div class='grid2'>"
-"<div><span class='lbl'>T1 Top-Left (Sun)</span><input type='number' step='0.1' id='t1' value='24.5'></div>"
-"<div><span class='lbl'>T2 Top-Right (Cloud)</span><input type='number' step='0.1' id='t2' value='18.2'></div>"
-"<div><span class='lbl'>T3 Bottom-Left (Rain)</span><input type='number' step='0.1' id='t3' value='12.0'></div>"
-"<div><span class='lbl'>T4 Bottom-Right (Storm)</span><input type='number' step='0.1' id='t4' value='-5.5'></div>"
+"<div><span class='lbl'>T1 Top-Left</span><div style='display:flex;gap:4px'><input type='number' step='0.1' id='t1' value='24.5'><select id='i1' style='width:92px'></select></div></div>"
+"<div><span class='lbl'>T2 Top-Right</span><div style='display:flex;gap:4px'><input type='number' step='0.1' id='t2' value='18.2'><select id='i2' style='width:92px'></select></div></div>"
+"<div><span class='lbl'>T3 Bottom-Left</span><div style='display:flex;gap:4px'><input type='number' step='0.1' id='t3' value='12.0'><select id='i3' style='width:92px'></select></div></div>"
+"<div><span class='lbl'>T4 Bottom-Right</span><div style='display:flex;gap:4px'><input type='number' step='0.1' id='t4' value='-5.5'><select id='i4' style='width:92px'></select></div></div>"
 "</div>"
-"<button class='btn btn-g' onclick='sendTemps()'>Push Temps to Screen Now</button>"
+"<div style='font-size:11px;color:#94a3b8;margin:6px 0 10px'>*In Night Mode, top row locks to time/date while bottom row displays telemetry &amp; icons.</div>"
+"<button class='btn btn-g' onclick='sendTemps()'>Push Temps &amp; Icons to Screen Now</button>"
 "</div>"
 
 "</div><div id='toast'></div>"
 "<script>"
 "let tmr=null,busy=false,queued=false,devSec=0;"
 "const $=id=>document.getElementById(id);"
+"const ICONS=['Sun','Cloud','Rain','Storm','Snow','Mist','Moon','Home','Bed','Living','Office','Water','Fire','Thermo','Heart','Tree','Fan','Battery','Bell','Car'];"
+"['i1','i2','i3','i4'].forEach(id=>{const sel=$(id);ICONS.forEach((n,i)=>{const o=document.createElement('option');o.value=i;o.text=n;sel.add(o);});});"
 "function fmt(s){const d=new Date(s*1000);return d.toISOString().substr(11,8);}"
 "setInterval(()=>{if(devSec>0){devSec++;$('clockDisplay').innerText=fmt(devSec);}},1000);"
 "function toast(m,ok=true){const t=$('toast');t.innerText=m;t.className=ok?'ok':'err';t.style.display='block';clearTimeout(t.k);t.k=setTimeout(()=>t.style.display='none',2200);}"
@@ -150,6 +153,7 @@ static const char INDEX_HTML[] =
 "$('sScan').checked=d.sScan;$('sTmp').checked=d.sTmp;$('sMsg').checked=d.sMsg;"
 "$('cmsg').value=d.cmsg||'';$('cdur').value=Math.round((d.cdur||10000)/1000);"
 "if(d.t1!==undefined){$('t1').value=d.t1;$('t2').value=d.t2;$('t3').value=d.t3;$('t4').value=d.t4;}"
+"if(d.i1!==undefined){$('i1').value=d.i1;$('i2').value=d.i2;$('i3').value=d.i3;$('i4').value=d.i4;}"
 "if(d.epoch)devSec=d.epoch;"
 "if(d.time)$('clockDisplay').innerText=d.time;"
 "if(d.weather)$('weatherDisplay').innerText=d.weather;"
@@ -178,7 +182,7 @@ static const char INDEX_HTML[] =
 "setTimeout(()=>fetch('/api/settings').then(r=>r.json()).then(apply),2500);"
 "}"
 "function sendTemps(){"
-"post({cmd:'temps',t1:parseFloat($('t1').value),t2:parseFloat($('t2').value),t3:parseFloat($('t3').value),t4:parseFloat($('t4').value)},'Temps pushed to screen!');"
+"post({cmd:'temps',t1:parseFloat($('t1').value),i1:parseInt($('i1').value),t2:parseFloat($('t2').value),i2:parseInt($('i2').value),t3:parseFloat($('t3').value),i3:parseInt($('i3').value),t4:parseFloat($('t4').value),i4:parseInt($('i4').value)},'Temps & icons pushed!');"
 "}"
 "function jump(st){post({cmd:'jump',state:st},'Switched screen mode');}"
 "function syncTime(silent){"
@@ -280,6 +284,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req) {
         "\"sClk\":%s,\"sTyp\":%s,\"sSprk\":%s,\"sScan\":%s,\"sTmp\":%s,\"sMsg\":%s,"
         "\"cmsg\":\"%s\",\"cdur\":%d,"
         "\"t1\":%.1f,\"t2\":%.1f,\"t3\":%.1f,\"t4\":%.1f,"
+        "\"i1\":%d,\"i2\":%d,\"i3\":%d,\"i4\":%d,"
         "\"time\":\"%02d:%02d:%02d\",\"epoch\":%ld,\"weather\":\"%s\",\"ip\":\"%s\"}",
         g_cfg.fliph ? "true" : "false",
         g_cfg.flipv ? "true" : "false",
@@ -294,6 +299,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req) {
         g_cfg.show_msg ? "true" : "false",
         g_cfg.custom_msg, g_cfg.custom_msg_duration_ms,
         g_cfg.ext_temps[0], g_cfg.ext_temps[1], g_cfg.ext_temps[2], g_cfg.ext_temps[3],
+        g_cfg.ext_temp_icons[0], g_cfg.ext_temp_icons[1], g_cfg.ext_temp_icons[2], g_cfg.ext_temp_icons[3],
         ti.tm_hour, ti.tm_min, ti.tm_sec, (long)now,
         g_live_weather_str, g_ip_str);
 
@@ -304,7 +310,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req) {
 
 static esp_err_t settings_post_handler(httpd_req_t *req) {
     set_fast_socket(req);
-    char buf[512];
+    char buf[768];
     int remaining = req->content_len;
     if (remaining >= (int)sizeof(buf)) remaining = sizeof(buf) - 1;
 
@@ -373,6 +379,20 @@ static esp_err_t settings_post_handler(httpd_req_t *req) {
         if (json_get_float(buf, "t2", &fv)) g_cfg.ext_temps[1] = fv;
         if (json_get_float(buf, "t3", &fv)) g_cfg.ext_temps[2] = fv;
         if (json_get_float(buf, "t4", &fv)) g_cfg.ext_temps[3] = fv;
+
+        char icon_str[24];
+        if (json_get_str(buf, "i1", icon_str, sizeof(icon_str))) g_cfg.ext_temp_icons[0] = matrix_parse_icon_name(icon_str);
+        else if (json_get_int(buf, "i1", &iv)) g_cfg.ext_temp_icons[0] = (iv >= 0 && iv < ICON_COUNT) ? (uint8_t)iv : 0;
+
+        if (json_get_str(buf, "i2", icon_str, sizeof(icon_str))) g_cfg.ext_temp_icons[1] = matrix_parse_icon_name(icon_str);
+        else if (json_get_int(buf, "i2", &iv)) g_cfg.ext_temp_icons[1] = (iv >= 0 && iv < ICON_COUNT) ? (uint8_t)iv : 0;
+
+        if (json_get_str(buf, "i3", icon_str, sizeof(icon_str))) g_cfg.ext_temp_icons[2] = matrix_parse_icon_name(icon_str);
+        else if (json_get_int(buf, "i3", &iv)) g_cfg.ext_temp_icons[2] = (iv >= 0 && iv < ICON_COUNT) ? (uint8_t)iv : 0;
+
+        if (json_get_str(buf, "i4", icon_str, sizeof(icon_str))) g_cfg.ext_temp_icons[3] = matrix_parse_icon_name(icon_str);
+        else if (json_get_int(buf, "i4", &iv)) g_cfg.ext_temp_icons[3] = (iv >= 0 && iv < ICON_COUNT) ? (uint8_t)iv : 0;
+
         app_trigger_state(STATE_WIPE_TO_TEMPS);
     }
 

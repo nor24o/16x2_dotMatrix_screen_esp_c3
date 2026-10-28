@@ -30,9 +30,35 @@ extern "C" {
 #define PIN_ADDR_C   0
 #define PIN_BLANK    5
 
+// Icon Library
+typedef enum {
+    ICON_SUN = 0,
+    ICON_CLOUD,
+    ICON_RAIN,
+    ICON_THUNDER,
+    ICON_SNOW,
+    ICON_MIST,
+    ICON_MOON,
+    ICON_HOME,
+    ICON_BED,
+    ICON_LIVING,
+    ICON_OFFICE,
+    ICON_WATER,
+    ICON_FIRE,
+    ICON_THERMO,
+    ICON_HEART,
+    ICON_TREE,
+    ICON_FAN,
+    ICON_BATTERY,
+    ICON_BELL,
+    ICON_CAR,
+    ICON_COUNT
+} matrix_icon_t;
+
 // Initialization & Control
 void matrix_init(void);
 void matrix_clear(void);
+void matrix_clear_screen(uint8_t screen);
 void matrix_show(void);
 void matrix_set_pixel(int virtualX, int y, uint8_t state);
 int  matrix_get_virtual_mod_start(uint8_t screen, uint8_t mod);
@@ -41,7 +67,17 @@ void matrix_draw_string(uint8_t screen, uint8_t start_mod, const char *str);
 void matrix_draw_text_at(int x, const char *msg);
 void matrix_draw_text_on_screen(uint8_t screen, int x, const char *msg);
 void matrix_draw_4temps(float t1, float t2, float t3, float t4);
+void matrix_draw_4temps_custom(float t1, float t2, float t3, float t4,
+                               uint8_t i1, uint8_t i2, uint8_t i3, uint8_t i4);
+void matrix_draw_night_temps(float t_left, uint8_t icon_left, float t_right, uint8_t icon_right);
 void matrix_screen_sweep(void);
+
+// Icon functions
+const uint8_t *matrix_get_icon(uint8_t icon_id);
+uint8_t matrix_parse_icon_name(const char *name);
+const char *matrix_get_icon_name(uint8_t icon_id);
+void matrix_draw_icon(uint8_t screen, uint8_t mod, uint8_t icon_id);
+void matrix_draw_icon_raw(uint8_t screen, uint8_t mod, const uint8_t *icon_bytes);
 
 // Settings
 void matrix_set_flip(bool flip_h, bool flip_v);

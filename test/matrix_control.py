@@ -6,7 +6,7 @@ import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QTabWidget, 
                              QGroupBox, QSlider, QSpinBox, QDoubleSpinBox, 
-                             QCheckBox, QPushButton, QFormLayout, QMessageBox,
+                             QCheckBox, QComboBox, QPushButton, QFormLayout, QMessageBox,
                              QFileDialog)
 from PySide6.QtCore import Qt, Signal, Slot
 
@@ -274,14 +274,24 @@ class MatrixControllerApp(QMainWindow):
         alert_form.addRow(btn_alert)
         layout.addWidget(alert_group)
         
-        temp_group = QGroupBox(" Dynamic Telematic Node Injection ")
+        temp_group = QGroupBox(" Dynamic Telematic Node Injection and Custom Icons ")
         temp_grid = QFormLayout(temp_group)
         self.temp_nodes = []
+        self.icon_combos = []
+        icons = ["home", "bed", "living", "office", "water", "fire", "tree", "sun", "moon", "cloud", "rain", "thunder", "snow", "mist", "thermo", "heart", "fan", "battery", "bell", "car"]
+        default_icons = ["home", "bed", "tree", "water"]
         for i in range(4):
+            hrow = QHBoxLayout()
             spin = QDoubleSpinBox(); spin.setRange(-50.0, 99.9); spin.setValue(22.0 + (i * 5.1)); spin.setSuffix(" °C")
-            temp_grid.addRow(f"Modbus Node T{i+1}:", spin)
+            combo = QComboBox()
+            combo.addItems(icons)
+            combo.setCurrentText(default_icons[i])
+            hrow.addWidget(spin)
+            hrow.addWidget(combo)
+            temp_grid.addRow(f"Node T{i+1}:", hrow)
             self.temp_nodes.append(spin)
-        btn_temps = QPushButton("Push Simulated Telemetry Values")
+            self.icon_combos.append(combo)
+        btn_temps = QPushButton("Push Simulated Telemetry and Custom Icons")
         btn_temps.clicked.connect(self.send_sim_temps)
         temp_grid.addRow(btn_temps)
         layout.addWidget(temp_group)
@@ -303,8 +313,11 @@ class MatrixControllerApp(QMainWindow):
 
     def send_sim_temps(self):
         self.async_send_payload({
-            "cmd": "temps", "t1": self.temp_nodes[0].value(), "t2": self.temp_nodes[1].value(),
-            "t3": self.temp_nodes[2].value(), "t4": self.temp_nodes[3].value()
+            "cmd": "temps",
+            "t1": self.temp_nodes[0].value(), "i1": self.icon_combos[0].currentText(),
+            "t2": self.temp_nodes[1].value(), "i2": self.icon_combos[1].currentText(),
+            "t3": self.temp_nodes[2].value(), "i3": self.icon_combos[2].currentText(),
+            "t4": self.temp_nodes[3].value(), "i4": self.icon_combos[3].currentText()
         }, expect_reply=True)
 
     def toggle_stress_test(self):

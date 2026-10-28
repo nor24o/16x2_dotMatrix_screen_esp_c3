@@ -1,6 +1,8 @@
 #include "matrix.h"
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -98,13 +100,88 @@ static const uint8_t FONT_BIG_DIGITS[][4] = {
     {0x00, 0x00, 0x00, 0x00}  // 12: space
 };
 
-static const uint8_t ICON_SUN_MOD[5]     = {0x42, 0x24, 0x3C, 0x24, 0x42};
-static const uint8_t ICON_CLOUD_MOD[5]   = {0x0C, 0x1E, 0x3F, 0x33, 0x1E};
-static const uint8_t ICON_RAIN_MOD[5]    = {0x0C, 0x1E, 0x3B, 0x33, 0x20};
-static const uint8_t ICON_THUNDER_MOD[5] = {0x06, 0x1C, 0x38, 0x0E, 0x03};
+// 20 Custom 5x7 Dot-Matrix Icons (5 columns of 8-bit vertical pixels)
+static const uint8_t ICONS_LIB[ICON_COUNT][5] = {
+    {0x42, 0x24, 0x3C, 0x24, 0x42}, // 0: ICON_SUN
+    {0x0C, 0x1E, 0x3F, 0x33, 0x1E}, // 1: ICON_CLOUD
+    {0x0C, 0x1E, 0x3B, 0x33, 0x20}, // 2: ICON_RAIN
+    {0x06, 0x1C, 0x38, 0x0E, 0x03}, // 3: ICON_THUNDER
+    {0x15, 0x0E, 0x1F, 0x0E, 0x15}, // 4: ICON_SNOW
+    {0x24, 0x49, 0x24, 0x49, 0x24}, // 5: ICON_MIST
+    {0x1E, 0x21, 0x21, 0x12, 0x0C}, // 6: ICON_MOON
+    {0x7C, 0x46, 0x77, 0x46, 0x7C}, // 7: ICON_HOME
+    {0x7E, 0x1C, 0x18, 0x18, 0x78}, // 8: ICON_BED
+    {0x3E, 0x1C, 0x1C, 0x1C, 0x3E}, // 9: ICON_LIVING
+    {0x0F, 0x29, 0x39, 0x29, 0x0F}, // 10: ICON_OFFICE
+    {0x1C, 0x3E, 0x3F, 0x3E, 0x1C}, // 11: ICON_WATER
+    {0x18, 0x3E, 0x2F, 0x3C, 0x18}, // 12: ICON_FIRE
+    {0x30, 0x7F, 0x7D, 0x7F, 0x30}, // 13: ICON_THERMO
+    {0x0E, 0x1F, 0x3E, 0x1F, 0x0E}, // 14: ICON_HEART
+    {0x10, 0x1A, 0x7F, 0x1A, 0x10}, // 15: ICON_TREE
+    {0x43, 0x22, 0x1C, 0x44, 0xC2}, // 16: ICON_FAN
+    {0x7E, 0x42, 0x43, 0x42, 0x7E}, // 17: ICON_BATTERY
+    {0x30, 0x7C, 0x7F, 0x7C, 0x30}, // 18: ICON_BELL
+    {0x18, 0x3C, 0x7E, 0x3C, 0x18}  // 19: ICON_CAR
+};
+
+static const char *ICON_NAMES[ICON_COUNT] = {
+    "sun", "cloud", "rain", "thunder", "snow", "mist", "moon", "home",
+    "bed", "living", "office", "water", "fire", "thermo", "heart", "tree",
+    "fan", "battery", "bell", "car"
+};
+
+const uint8_t *matrix_get_icon(uint8_t icon_id) {
+    if (icon_id >= ICON_COUNT) icon_id = 0;
+    return ICONS_LIB[icon_id];
+}
+
+const char *matrix_get_icon_name(uint8_t icon_id) {
+    if (icon_id >= ICON_COUNT) icon_id = 0;
+    return ICON_NAMES[icon_id];
+}
+
+uint8_t matrix_parse_icon_name(const char *name) {
+    if (!name || !name[0]) return ICON_SUN;
+    if (name[0] >= '0' && name[0] <= '9') {
+        int v = atoi(name);
+        if (v >= 0 && v < ICON_COUNT) return (uint8_t)v;
+    }
+    if (strcasecmp(name, "sun") == 0 || strcasecmp(name, "clear") == 0 || strcasecmp(name, "day") == 0) return ICON_SUN;
+    if (strcasecmp(name, "cloud") == 0 || strcasecmp(name, "cld") == 0) return ICON_CLOUD;
+    if (strcasecmp(name, "rain") == 0) return ICON_RAIN;
+    if (strcasecmp(name, "thunder") == 0 || strcasecmp(name, "storm") == 0 || strcasecmp(name, "bolt") == 0) return ICON_THUNDER;
+    if (strcasecmp(name, "snow") == 0 || strcasecmp(name, "frost") == 0 || strcasecmp(name, "ice") == 0) return ICON_SNOW;
+    if (strcasecmp(name, "mist") == 0 || strcasecmp(name, "fog") == 0) return ICON_MIST;
+    if (strcasecmp(name, "moon") == 0 || strcasecmp(name, "night") == 0) return ICON_MOON;
+    if (strcasecmp(name, "home") == 0 || strcasecmp(name, "house") == 0 || strcasecmp(name, "indoor") == 0 || strcasecmp(name, "in") == 0) return ICON_HOME;
+    if (strcasecmp(name, "bed") == 0 || strcasecmp(name, "bedroom") == 0) return ICON_BED;
+    if (strcasecmp(name, "living") == 0 || strcasecmp(name, "sofa") == 0 || strcasecmp(name, "couch") == 0) return ICON_LIVING;
+    if (strcasecmp(name, "office") == 0 || strcasecmp(name, "pc") == 0 || strcasecmp(name, "desk") == 0 || strcasecmp(name, "cpu") == 0) return ICON_OFFICE;
+    if (strcasecmp(name, "water") == 0 || strcasecmp(name, "drop") == 0 || strcasecmp(name, "humidity") == 0 || strcasecmp(name, "boiler") == 0) return ICON_WATER;
+    if (strcasecmp(name, "fire") == 0 || strcasecmp(name, "flame") == 0 || strcasecmp(name, "heat") == 0 || strcasecmp(name, "heater") == 0) return ICON_FIRE;
+    if (strcasecmp(name, "thermo") == 0 || strcasecmp(name, "temp") == 0) return ICON_THERMO;
+    if (strcasecmp(name, "heart") == 0) return ICON_HEART;
+    if (strcasecmp(name, "tree") == 0 || strcasecmp(name, "outdoor") == 0 || strcasecmp(name, "out") == 0 || strcasecmp(name, "garden") == 0) return ICON_TREE;
+    if (strcasecmp(name, "fan") == 0 || strcasecmp(name, "wind") == 0) return ICON_FAN;
+    if (strcasecmp(name, "battery") == 0 || strcasecmp(name, "bat") == 0) return ICON_BATTERY;
+    if (strcasecmp(name, "bell") == 0 || strcasecmp(name, "alert") == 0) return ICON_BELL;
+    if (strcasecmp(name, "car") == 0 || strcasecmp(name, "garage") == 0) return ICON_CAR;
+    return ICON_SUN;
+}
 
 void matrix_clear(void) {
     memset(drawBuffer, 0, sizeof(drawBuffer));
+}
+
+void matrix_clear_screen(uint8_t screen) {
+    if (screen >= NUM_SCREENS) return;
+    int start_vx = screen * MODS_PER_SCREEN * VIRTUAL_MOD_WIDTH;
+    int end_vx = start_vx + (MODS_PER_SCREEN * VIRTUAL_MOD_WIDTH);
+    for (int x = start_vx; x < end_vx; x++) {
+        for (int y = 0; y < MATRIX_ROWS; y++) {
+            matrix_set_pixel(x, y, 0);
+        }
+    }
 }
 
 void matrix_show(void) {
@@ -252,16 +329,21 @@ static void draw_big_digit(uint8_t screen, uint8_t mod, char c) {
     }
 }
 
-static void draw_icon(uint8_t screen, uint8_t mod, const uint8_t *icon) {
+void matrix_draw_icon_raw(uint8_t screen, uint8_t mod, const uint8_t *icon_bytes) {
+    if (screen >= NUM_SCREENS || mod >= MODS_PER_SCREEN || !icon_bytes) return;
     int startX = matrix_get_virtual_mod_start(screen, mod);
     for (uint8_t col = 0; col < 5; col++) {
-        uint8_t data = icon[col];
+        uint8_t data = icon_bytes[col];
         for (uint8_t r = 0; r < 8; r++) {
             if (data & (1 << r)) {
                 matrix_set_pixel(startX + col, r, 1);
             }
         }
     }
+}
+
+void matrix_draw_icon(uint8_t screen, uint8_t mod, uint8_t icon_id) {
+    matrix_draw_icon_raw(screen, mod, matrix_get_icon(icon_id));
 }
 
 static void draw_single_temp(uint8_t screen, uint8_t startMod, float temp) {
@@ -289,15 +371,32 @@ static void draw_single_temp(uint8_t screen, uint8_t startMod, float temp) {
     }
 }
 
-void matrix_draw_4temps(float t1, float t2, float t3, float t4) {
+void matrix_draw_4temps_custom(float t1, float t2, float t3, float t4,
+                               uint8_t i1, uint8_t i2, uint8_t i3, uint8_t i4) {
     draw_single_temp(0, 0, t1);
-    draw_icon(0, 5, ICON_SUN_MOD);
+    matrix_draw_icon(0, 5, i1);
     draw_single_temp(0, 9, t2);
-    draw_icon(0, 14, ICON_CLOUD_MOD);
+    matrix_draw_icon(0, 14, i2);
     draw_single_temp(1, 0, t3);
-    draw_icon(1, 5, ICON_RAIN_MOD);
+    matrix_draw_icon(1, 5, i3);
     draw_single_temp(1, 9, t4);
-    draw_icon(1, 14, ICON_THUNDER_MOD);
+    matrix_draw_icon(1, 14, i4);
+}
+
+void matrix_draw_4temps(float t1, float t2, float t3, float t4) {
+    matrix_draw_4temps_custom(t1, t2, t3, t4, ICON_SUN, ICON_CLOUD, ICON_RAIN, ICON_THUNDER);
+}
+
+void matrix_draw_night_temps(float t_left, uint8_t icon_left, float t_right, uint8_t icon_right) {
+    matrix_clear_screen(1);
+    if (t_left > -90.0f && t_left < 99.0f) {
+        draw_single_temp(1, 0, t_left);
+        matrix_draw_icon(1, 5, icon_left);
+    }
+    if (t_right > -90.0f && t_right < 99.0f) {
+        draw_single_temp(1, 9, t_right);
+        matrix_draw_icon(1, 14, icon_right);
+    }
 }
 
 void matrix_screen_sweep(void) {

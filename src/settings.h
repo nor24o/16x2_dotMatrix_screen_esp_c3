@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "matrix.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,7 +20,9 @@ typedef enum {
     STATE_SHOW_TEMPS,
     STATE_WIPE_TO_CLOCK,
     STATE_WIPE_TO_MSG,
-    STATE_SHOW_MSG
+    STATE_SHOW_MSG,
+    STATE_NIGHT_TEMPS,
+    STATE_NIGHT_MSG
 } app_state_t;
 
 typedef struct {
@@ -53,7 +56,8 @@ typedef struct {
     int  custom_msg_duration_ms;
 
     // Dynamic Runtime Telemetry (RAM)
-    float ext_temps[4];
+    float   ext_temps[4];
+    uint8_t ext_temp_icons[4]; // Icon IDs for T1, T2, T3, T4
 } app_settings_t;
 
 extern app_settings_t g_cfg;

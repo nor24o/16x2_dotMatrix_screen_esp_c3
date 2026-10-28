@@ -46,6 +46,13 @@ static inline uint32_t millis_now(void) {
 }
 
 void app_trigger_state(app_state_t new_state) {
+    if (settings_is_night_time()) {
+        if (new_state == STATE_WIPE_TO_TEMPS || new_state == STATE_SHOW_TEMPS || new_state == STATE_TEMPS) {
+            new_state = STATE_NIGHT_TEMPS;
+        } else if (new_state == STATE_WIPE_TO_MSG || new_state == STATE_SHOW_MSG || new_state == STATE_MESSAGE) {
+            new_state = STATE_NIGHT_MSG;
+        }
+    }
     s_current_state = new_state;
     s_init_next_anim = true;
 }
@@ -299,6 +306,27 @@ static void weather_task(void *pvParameters) {
 // ==========================================
 // 2. UDP PORT 8888 COMMAND LISTENER
 // ==========================================
+static uint8_t parse_json_icon(const char *json, const char *key, uint8_t fallback) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    const char *p = strstr(json, pat);
+    if (!p) return fallback;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    if (*p == '"') {
+        p++;
+        char name[24];
+        size_t i = 0;
+        while (*p && *p != '"' && i + 1 < sizeof(name)) name[i++] = *p++;
+        name[i] = '\0';
+        return matrix_parse_icon_name(name);
+    } else if (*p >= '0' && *p <= '9') {
+        int v = atoi(p);
+        if (v >= 0 && v < ICON_COUNT) return (uint8_t)v;
+    }
+    return fallback;
+}
+
 static void udp_server_task(void *pvParameters) {
     char rx_buf[256];
     struct sockaddr_in serv_addr, client_addr;
@@ -350,15 +378,23 @@ static void udp_server_task(void *pvParameters) {
             const char *p2 = strstr(rx_buf, "\"t2\":"); if (p2) g_cfg.ext_temps[1] = strtof(p2 + 5, NULL);
             const char *p3 = strstr(rx_buf, "\"t3\":"); if (p3) g_cfg.ext_temps[2] = strtof(p3 + 5, NULL);
             const char *p4 = strstr(rx_buf, "\"t4\":"); if (p4) g_cfg.ext_temps[3] = strtof(p4 + 5, NULL);
+
+            g_cfg.ext_temp_icons[0] = parse_json_icon(rx_buf, "i1", g_cfg.ext_temp_icons[0]);
+            g_cfg.ext_temp_icons[1] = parse_json_icon(rx_buf, "i2", g_cfg.ext_temp_icons[1]);
+            g_cfg.ext_temp_icons[2] = parse_json_icon(rx_buf, "i3", g_cfg.ext_temp_icons[2]);
+            g_cfg.ext_temp_icons[3] = parse_json_icon(rx_buf, "i4", g_cfg.ext_temp_icons[3]);
+
             app_trigger_state(STATE_WIPE_TO_TEMPS);
+            settings_schedule_save();
             reply = "{\"status\":\"TEMPS_RECEIVED\"}";
         } else if (strstr(rx_buf, "\"cmd\":\"info\"") || strstr(rx_buf, "\"cmd\": \"info\"")) {
-            char info_buf[384];
+            char info_buf[440];
             int ilen = snprintf(info_buf, sizeof(info_buf),
                 "{\"ip\":\"%s\",\"city\":\"%s\",\"country\":\"%s\",\"region\":\"%s\","
                 "\"bright\":%d,\"nbright\":%d,\"nstart\":%d,\"nend\":%d,"
                 "\"gmtoff\":%ld,\"dstoff\":%d,\"showClock\":%s,\"showTypewriter\":%s,"
-                "\"showSparkle\":%s,\"showScanner\":%s,\"showTemps\":%s,\"showMsg\":%s}",
+                "\"showSparkle\":%s,\"showScanner\":%s,\"showTemps\":%s,\"showMsg\":%s,"
+                "\"i1\":%d,\"i2\":%d,\"i3\":%d,\"i4\":%d}",
                 g_ip_str, g_cfg.city, g_cfg.country, g_cfg.region,
                 g_cfg.bright, g_cfg.nbright, g_cfg.nstart, g_cfg.nend,
                 g_cfg.gmtoff, g_cfg.dstoff,
@@ -367,7 +403,9 @@ static void udp_server_task(void *pvParameters) {
                 g_cfg.show_sparkle ? "true" : "false",
                 g_cfg.show_scanner ? "true" : "false",
                 g_cfg.show_temps ? "true" : "false",
-                g_cfg.show_msg ? "true" : "false");
+                g_cfg.show_msg ? "true" : "false",
+                g_cfg.ext_temp_icons[0], g_cfg.ext_temp_icons[1],
+                g_cfg.ext_temp_icons[2], g_cfg.ext_temp_icons[3]);
             sendto(sock, info_buf, ilen, 0, (struct sockaddr *)&client_addr, socklen);
         }
         if (reply) {
@@ -572,13 +610,156 @@ static bool anim_external_temps(uint32_t duration_ms, bool init) {
     static uint32_t start_ms = 0;
     if (init) {
         matrix_clear();
-        matrix_draw_4temps(g_cfg.ext_temps[0], g_cfg.ext_temps[1],
-                           g_cfg.ext_temps[2], g_cfg.ext_temps[3]);
+        matrix_draw_4temps_custom(g_cfg.ext_temps[0], g_cfg.ext_temps[1],
+                                  g_cfg.ext_temps[2], g_cfg.ext_temps[3],
+                                  g_cfg.ext_temp_icons[0], g_cfg.ext_temp_icons[1],
+                                  g_cfg.ext_temp_icons[2], g_cfg.ext_temp_icons[3]);
         matrix_show();
         start_ms = millis_now();
         return false;
     }
     return (millis_now() - start_ms >= duration_ms);
+}
+
+static bool anim_night_temps(uint32_t duration_ms, bool init) {
+    static uint32_t start_ms = 0;
+    static uint32_t prev_blink_ms = 0;
+    static bool blink_state = true;
+    static int phase = 0;
+    static uint32_t prev_phase_ms = 0;
+
+    uint32_t now_ms = millis_now();
+    if (init) {
+        start_ms = now_ms;
+        prev_blink_ms = now_ms;
+        prev_phase_ms = now_ms;
+        blink_state = true;
+        phase = 0;
+        matrix_clear_screen(1);
+        return false;
+    }
+
+    if (now_ms - start_ms >= duration_ms) {
+        matrix_clear_screen(1);
+        matrix_show();
+        return true;
+    }
+
+    bool needs_redraw = false;
+    if (now_ms - prev_blink_ms >= 500) {
+        prev_blink_ms = now_ms;
+        blink_state = !blink_state;
+        needs_redraw = true;
+    }
+
+    bool has_t3_or_t4 = (g_cfg.ext_temps[2] > -90.0f && g_cfg.ext_temps[2] < 99.0f) ||
+                        (g_cfg.ext_temps[3] > -90.0f && g_cfg.ext_temps[3] < 99.0f);
+    if (has_t3_or_t4 && (now_ms - prev_phase_ms >= 4000)) {
+        prev_phase_ms = now_ms;
+        phase = (phase == 0) ? 1 : 0;
+        needs_redraw = true;
+    }
+
+    if (needs_redraw) {
+        // Redraw Screen 0 (Clock: day month hour min)
+        matrix_clear_screen(0);
+        time_t now;
+        time(&now);
+        struct tm ti;
+        gmtime_r(&now, &ti);
+
+        char month_str[4];
+        strftime(month_str, sizeof(month_str), "%b", &ti);
+        for (int i = 0; i < 3; i++) month_str[i] = (char)toupper((unsigned char)month_str[i]);
+
+        char top_line[16];
+        snprintf(top_line, sizeof(top_line), "%02d %s %02d%c%02d",
+                 ti.tm_mday, month_str, ti.tm_hour, blink_state ? ':' : ' ', ti.tm_min);
+        for (int i = 0; i < 12; i++) {
+            matrix_draw_char(0, i + 2, top_line[i]);
+        }
+
+        // Redraw Screen 1 (Bottom row: temps + custom icons)
+        if (phase == 0 || !has_t3_or_t4) {
+            matrix_draw_night_temps(g_cfg.ext_temps[0], g_cfg.ext_temp_icons[0],
+                                    g_cfg.ext_temps[1], g_cfg.ext_temp_icons[1]);
+        } else {
+            matrix_draw_night_temps(g_cfg.ext_temps[2], g_cfg.ext_temp_icons[2],
+                                    g_cfg.ext_temps[3], g_cfg.ext_temp_icons[3]);
+        }
+        matrix_show();
+    }
+    return false;
+}
+
+static bool anim_night_msg(uint32_t duration_ms, const char *msg, bool init) {
+    static uint32_t start_ms = 0;
+    static uint32_t prev_scroll_ms = 0;
+    static uint32_t prev_blink_ms = 0;
+    static int scroll_x = 0;
+    static bool blink_state = true;
+
+    int screen1_start = matrix_get_virtual_mod_start(1, 0);
+    uint32_t now_ms = millis_now();
+
+    if (init) {
+        start_ms = now_ms;
+        prev_scroll_ms = now_ms;
+        prev_blink_ms = now_ms;
+        scroll_x = VIRTUAL_COLS;
+        blink_state = true;
+        matrix_clear_screen(1);
+        return false;
+    }
+
+    if (now_ms - start_ms >= duration_ms) {
+        matrix_clear_screen(1);
+        matrix_show();
+        return true;
+    }
+
+    bool needs_redraw = false;
+    if (now_ms - prev_blink_ms >= 500) {
+        prev_blink_ms = now_ms;
+        blink_state = !blink_state;
+        needs_redraw = true;
+    }
+
+    if (now_ms - prev_scroll_ms >= 25) {
+        prev_scroll_ms = now_ms;
+        scroll_x--;
+        int len = strlen(msg);
+        if (scroll_x < screen1_start - (len * VIRTUAL_MOD_WIDTH)) {
+            scroll_x = VIRTUAL_COLS;
+        }
+        needs_redraw = true;
+    }
+
+    if (needs_redraw) {
+        // Redraw Screen 0 (Clock: day month hour min)
+        matrix_clear_screen(0);
+        time_t now;
+        time(&now);
+        struct tm ti;
+        gmtime_r(&now, &ti);
+
+        char month_str[4];
+        strftime(month_str, sizeof(month_str), "%b", &ti);
+        for (int i = 0; i < 3; i++) month_str[i] = (char)toupper((unsigned char)month_str[i]);
+
+        char top_line[16];
+        snprintf(top_line, sizeof(top_line), "%02d %s %02d%c%02d",
+                 ti.tm_mday, month_str, ti.tm_hour, blink_state ? ':' : ' ', ti.tm_min);
+        for (int i = 0; i < 12; i++) {
+            matrix_draw_char(0, i + 2, top_line[i]);
+        }
+
+        // Redraw Screen 1 (Scrolled message)
+        matrix_clear_screen(1);
+        matrix_draw_text_on_screen(1, scroll_x, msg);
+        matrix_show();
+    }
+    return false;
 }
 
 static bool anim_wipe_reverse(uint32_t speed_ms, bool init) {
@@ -776,6 +957,28 @@ static void playlist_task(void *pvParameters) {
                     s_init_next_anim = false;
                 }
                 if (anim_wipe_reverse(5, false)) {
+                    s_current_state = STATE_CLOCK;
+                    s_init_next_anim = true;
+                }
+                break;
+
+            case STATE_NIGHT_TEMPS:
+                if (s_init_next_anim) {
+                    anim_night_temps(8000, true);
+                    s_init_next_anim = false;
+                }
+                if (anim_night_temps(8000, false)) {
+                    s_current_state = STATE_CLOCK;
+                    s_init_next_anim = true;
+                }
+                break;
+
+            case STATE_NIGHT_MSG:
+                if (s_init_next_anim) {
+                    anim_night_msg((uint32_t)g_cfg.custom_msg_duration_ms, g_cfg.custom_msg, true);
+                    s_init_next_anim = false;
+                }
+                if (anim_night_msg((uint32_t)g_cfg.custom_msg_duration_ms, g_cfg.custom_msg, false)) {
                     s_current_state = STATE_CLOCK;
                     s_init_next_anim = true;
                 }
