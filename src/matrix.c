@@ -11,7 +11,7 @@
 
 static const char *TAG = "MATRIX";
 
-#define REFRESH_INTERVAL_US 1500
+#define REFRESH_INTERVAL_US 1200
 
 #define DATA_HIGH()   REG_WRITE(GPIO_OUT_W1TS_REG, (1UL << PIN_DATA))
 #define DATA_LOW()    REG_WRITE(GPIO_OUT_W1TC_REG, (1UL << PIN_DATA))
@@ -33,13 +33,13 @@ static const char *TAG = "MATRIX";
 static uint8_t drawBuffer[MATRIX_ROWS][BUFFER_BYTES];
 static volatile uint8_t displayBuffer[MATRIX_ROWS][BUFFER_BYTES];
 
-static TaskHandle_t s_display_task_handle = NULL;
 static esp_timer_handle_t s_display_timer = NULL;
+static esp_timer_handle_t s_oe_off_timer = NULL;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static volatile bool s_flip_h = false;
 static volatile bool s_flip_v = false;
-static volatile int s_brightness_us = 400;
+static volatile int s_brightness_us = 350;
 
 // Standard 5x7 ASCII character bitmaps
 static const uint8_t FONT_TEXT[][5] = {
@@ -197,7 +197,7 @@ void matrix_get_flip(bool *flip_h, bool *flip_v) {
 
 void matrix_set_brightness(int us) {
     if (us < 10) us = 10;
-    if (us > 450) us = 450;
+    if (us > 800) us = 800;
     s_brightness_us = us;
 }
 
@@ -206,70 +206,70 @@ int matrix_get_brightness(void) {
 }
 
 // -------------------------------------------------------------
-// FreeRTOS Display Multiplexer Task (Priority 4, Responsive to lwIP & HTTP)
+// Zero-Flicker Non-Blocking Dual Hardware Timer Multiplexer
+// - row_timer_callback shifts 20 bytes in ~15us and starts OE pulse
+// - oe_off_timer_callback turns OE off after exact pulse_us (0% busy-wait!)
 // -------------------------------------------------------------
-static void display_refresh_task(void *pvParameters) {
-    uint8_t currentRow = 0;
-
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        // 0. Blank LEDs during latch & row switch
-        OE_HIGH();
-
-        // 1. Shift all 20 bytes (160 physical bits, LSB first, ~4 MHz clock)
-        for (int b = 0; b < BUFFER_BYTES; b++) {
-            uint8_t data = displayBuffer[currentRow][b];
-            for (int i = 0; i < 8; i++) {
-                CLK_LOW();
-                if (data & 1) {
-                    DATA_HIGH();
-                } else {
-                    DATA_LOW();
-                }
-                data >>= 1;
-                for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns setup (4 MHz)
-                CLK_HIGH();
-                for (volatile int k = 0; k < 20; k++) __asm__("nop"); // ~125ns hold  (4 MHz)
-            }
-        }
-        CLK_LOW();
-
-        // 2. Select Row Address (3-to-8 decoder)
-        uint8_t addr = 7 - currentRow;
-        if (addr & 0x01) ADDR_A_HIGH(); else ADDR_A_LOW();
-        if (addr & 0x02) ADDR_B_HIGH(); else ADDR_B_LOW();
-        if (addr & 0x04) ADDR_C_HIGH(); else ADDR_C_LOW();
-
-        // 3. Strobe Latch
-        STR_HIGH();
-        __asm__("nop");
-        __asm__("nop");
-        __asm__("nop");
-        __asm__("nop");
-        STR_LOW();
-        esp_rom_delay_us(2);
-
-        // 4. Illuminate for brightness duration (capped at 450us to preserve CPU for network)
-        int pulse = s_brightness_us;
-        if (pulse > 450) {
-            pulse = 450;
-        }
-
-        if (pulse > 0) {
-            OE_LOW();
-            esp_rom_delay_us(pulse);
-            OE_HIGH();
-        }
-
-        currentRow = (currentRow + 1) & 0x07;
-    }
+static void IRAM_ATTR oe_off_timer_callback(void* arg) {
+    OE_HIGH();
 }
 
-static void IRAM_ATTR timer_callback(void* arg) {
-    if (s_display_task_handle != NULL) {
-        xTaskNotifyGive(s_display_task_handle);
+static void IRAM_ATTR row_timer_callback(void* arg) {
+    static uint8_t currentRow = 0;
+
+    // 0. Ensure OE is blanked before shifting
+    esp_timer_stop(s_oe_off_timer);
+    OE_HIGH();
+
+    portENTER_CRITICAL_SAFE(&s_mux);
+
+    // 1. Shift all 20 bytes (160 physical bits, LSB first)
+    for (int b = 0; b < BUFFER_BYTES; b++) {
+        uint8_t data = displayBuffer[currentRow][b];
+        for (int i = 0; i < 8; i++) {
+            CLK_LOW();
+            if (data & 1) {
+                DATA_HIGH();
+            } else {
+                DATA_LOW();
+            }
+            data >>= 1;
+            __asm__ volatile("nop; nop; nop; nop;");
+            CLK_HIGH();
+            __asm__ volatile("nop; nop; nop; nop;");
+        }
     }
+    CLK_LOW();
+
+    // 2. Select Row Address (3-to-8 decoder)
+    uint8_t addr = 7 - currentRow;
+    if (addr & 0x01) ADDR_A_HIGH(); else ADDR_A_LOW();
+    if (addr & 0x02) ADDR_B_HIGH(); else ADDR_B_LOW();
+    if (addr & 0x04) ADDR_C_HIGH(); else ADDR_C_LOW();
+
+    // 3. Strobe Latch
+    STR_HIGH();
+    __asm__ volatile("nop; nop; nop; nop; nop; nop; nop; nop;");
+    STR_LOW();
+
+    portEXIT_CRITICAL_SAFE(&s_mux);
+
+    // 4. Illuminate row via hardware one-shot timer (zero CPU blocking!)
+    int pulse = s_brightness_us;
+    if (pulse > (REFRESH_INTERVAL_US - 150)) {
+        pulse = REFRESH_INTERVAL_US - 150;
+    }
+
+    if (pulse >= 15) {
+        OE_LOW();
+        esp_timer_start_once(s_oe_off_timer, pulse);
+    } else if (pulse > 0) {
+        OE_LOW();
+        esp_rom_delay_us(pulse);
+        OE_HIGH();
+    }
+
+    currentRow = (currentRow + 1) & 0x07;
 }
 
 void matrix_init(void) {
@@ -307,16 +307,20 @@ void matrix_init(void) {
     matrix_clear();
     matrix_show();
 
-    // 4. Create high-priority display task (Priority 4: runs smoothly, allows lwIP & HTTP to preempt)
-    xTaskCreate(display_refresh_task, "DispMuxTask", 4096, NULL, 4, &s_display_task_handle);
-
-    // 5. Start periodic hardware timer for display multiplexing ticks
-    const esp_timer_create_args_t timer_args = {
-        .callback = &timer_callback,
-        .name = "disp_timer"
+    // 4. Create one-shot hardware timer for OE pulse termination
+    const esp_timer_create_args_t oe_timer_args = {
+        .callback = &oe_off_timer_callback,
+        .name = "oe_off_timer"
     };
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_display_timer));
+    ESP_ERROR_CHECK(esp_timer_create(&oe_timer_args, &s_oe_off_timer));
+
+    // 5. Start periodic hardware timer for display row multiplexing (1200us = 104Hz frame rate)
+    const esp_timer_create_args_t row_timer_args = {
+        .callback = &row_timer_callback,
+        .name = "disp_row_timer"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&row_timer_args, &s_display_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_display_timer, REFRESH_INTERVAL_US));
 
-    ESP_LOGI(TAG, "Matrix Multiplexing started at %d us interval.", REFRESH_INTERVAL_US);
+    ESP_LOGI(TAG, "Matrix Non-Blocking Multiplexer started at %d us interval (104 Hz).", REFRESH_INTERVAL_US);
 }

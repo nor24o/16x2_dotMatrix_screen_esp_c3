@@ -32,7 +32,7 @@ void settings_load(bool *flip_h, bool *flip_v, int *brightness) {
         nvs_close(handle);
 
         if (b < 10) b = 10;
-        if (b > 450) b = 400;
+        if (b > 800) b = 800;
         if (flip_h) *flip_h = (bool)h;
         if (flip_v) *flip_v = (bool)v;
         if (brightness) *brightness = (int)b;
