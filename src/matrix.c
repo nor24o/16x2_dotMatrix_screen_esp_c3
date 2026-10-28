@@ -82,6 +82,27 @@ static const uint8_t FONT_TEXT[][5] = {
     {0x06, 0x49, 0x49, 0x29, 0x1E}  // 36: 9
 };
 
+static const uint8_t FONT_BIG_DIGITS[][4] = {
+    {0x7F, 0x41, 0x41, 0x7F}, // 0
+    {0x00, 0x42, 0x7F, 0x40}, // 1
+    {0x79, 0x49, 0x49, 0x4F}, // 2
+    {0x41, 0x49, 0x49, 0x7F}, // 3
+    {0x0F, 0x08, 0x08, 0x7F}, // 4
+    {0x4F, 0x49, 0x49, 0x79}, // 5
+    {0x7F, 0x49, 0x49, 0x79}, // 6
+    {0x01, 0x01, 0x01, 0x7F}, // 7
+    {0x7F, 0x49, 0x49, 0x7F}, // 8
+    {0x4F, 0x49, 0x49, 0x7F}, // 9
+    {0x00, 0x60, 0x60, 0x00}, // 10: .
+    {0x08, 0x08, 0x08, 0x08}, // 11: -
+    {0x00, 0x00, 0x00, 0x00}  // 12: space
+};
+
+static const uint8_t ICON_SUN_MOD[5]     = {0x42, 0x24, 0x3C, 0x24, 0x42};
+static const uint8_t ICON_CLOUD_MOD[5]   = {0x0C, 0x1E, 0x3F, 0x33, 0x1E};
+static const uint8_t ICON_RAIN_MOD[5]    = {0x0C, 0x1E, 0x3B, 0x33, 0x20};
+static const uint8_t ICON_THUNDER_MOD[5] = {0x06, 0x1C, 0x38, 0x0E, 0x03};
+
 void matrix_clear(void) {
     memset(drawBuffer, 0, sizeof(drawBuffer));
 }
@@ -90,6 +111,10 @@ void matrix_show(void) {
     portENTER_CRITICAL(&s_mux);
     memcpy((void *)displayBuffer, (void *)drawBuffer, sizeof(displayBuffer));
     portEXIT_CRITICAL(&s_mux);
+}
+
+int matrix_get_virtual_mod_start(uint8_t screen, uint8_t mod) {
+    return ((screen * MODS_PER_SCREEN) + mod) * VIRTUAL_MOD_WIDTH;
 }
 
 static inline int get_physical_x(int vx) {
@@ -124,44 +149,64 @@ static uint8_t get_char_index(char c) {
     return 0;
 }
 
-void matrix_draw_char(uint8_t screen, uint8_t mod, char c) {
-    if (screen >= NUM_SCREENS || mod >= MODS_PER_SCREEN) return;
-    int totalModIdx = (screen * MODS_PER_SCREEN) + mod;
-    int startX = totalModIdx * VIRTUAL_MOD_WIDTH;
-
-    if (c == ' ') return; // Space = blank
-
+static void draw_glyph_at(int x, int min_vx, int max_vx, char c) {
+    if (c == ' ') return;
     if (c >= 'a' && c <= 'z') c -= 32;
 
     if (c == ':') {
-        matrix_set_pixel(startX + 1, 2, 1);
-        matrix_set_pixel(startX + 1, 5, 1);
-        matrix_set_pixel(startX + 2, 2, 1);
-        matrix_set_pixel(startX + 2, 5, 1);
+        if (x + 1 >= min_vx && x + 2 < max_vx) {
+            matrix_set_pixel(x + 1, 2, 1);
+            matrix_set_pixel(x + 1, 5, 1);
+            matrix_set_pixel(x + 2, 2, 1);
+            matrix_set_pixel(x + 2, 5, 1);
+        }
         return;
     }
     if (c == '.') {
-        matrix_set_pixel(startX + 1, 7, 1);
-        matrix_set_pixel(startX + 2, 7, 1);
+        if (x + 1 >= min_vx && x + 2 < max_vx) {
+            matrix_set_pixel(x + 1, 7, 1);
+            matrix_set_pixel(x + 2, 7, 1);
+        }
         return;
     }
     if (c == '-') {
-        matrix_set_pixel(startX + 1, 4, 1);
-        matrix_set_pixel(startX + 2, 4, 1);
-        matrix_set_pixel(startX + 3, 4, 1);
+        for (int col = 1; col <= 3; col++) {
+            if (x + col >= min_vx && x + col < max_vx) {
+                matrix_set_pixel(x + col, 4, 1);
+            }
+        }
+        return;
+    }
+    if (c == '%') {
+        const int pts[6][2] = {{0,1},{3,1},{1,3},{2,4},{0,6},{3,6}};
+        for (int i = 0; i < 6; i++) {
+            int vx = x + pts[i][0];
+            if (vx >= min_vx && vx < max_vx) {
+                matrix_set_pixel(vx, pts[i][1], 1);
+            }
+        }
         return;
     }
 
     uint8_t idx = get_char_index(c);
     if (idx == 0) return;
     for (int col = 0; col < 5; col++) {
-        uint8_t data = FONT_TEXT[idx][col];
-        for (int r = 0; r < 8; r++) {
-            if (data & (1 << r)) {
-                matrix_set_pixel(startX + col, r, 1);
+        int vx = x + col;
+        if (vx >= min_vx && vx < max_vx) {
+            uint8_t data = FONT_TEXT[idx][col];
+            for (int r = 0; r < 8; r++) {
+                if (data & (1 << r)) {
+                    matrix_set_pixel(vx, r, 1);
+                }
             }
         }
     }
+}
+
+void matrix_draw_char(uint8_t screen, uint8_t mod, char c) {
+    if (screen >= NUM_SCREENS || mod >= MODS_PER_SCREEN) return;
+    int startX = matrix_get_virtual_mod_start(screen, mod);
+    draw_glyph_at(startX, 0, VIRTUAL_COLS, c);
 }
 
 void matrix_draw_string(uint8_t screen, uint8_t start_mod, const char *str) {
@@ -170,6 +215,89 @@ void matrix_draw_string(uint8_t screen, uint8_t start_mod, const char *str) {
     for (int i = 0; i < len && (start_mod + i) < MODS_PER_SCREEN; i++) {
         matrix_draw_char(screen, start_mod + i, str[i]);
     }
+}
+
+void matrix_draw_text_at(int x, const char *msg) {
+    int len = strlen(msg);
+    for (int i = 0; i < len; i++) {
+        draw_glyph_at(x, 0, VIRTUAL_COLS, msg[i]);
+        x += VIRTUAL_MOD_WIDTH;
+    }
+}
+
+void matrix_draw_text_on_screen(uint8_t screen, int x, const char *msg) {
+    if (screen >= NUM_SCREENS) return;
+    int min_vx = screen * MODS_PER_SCREEN * VIRTUAL_MOD_WIDTH;
+    int max_vx = (screen + 1) * MODS_PER_SCREEN * VIRTUAL_MOD_WIDTH;
+    int len = strlen(msg);
+    for (int i = 0; i < len; i++) {
+        draw_glyph_at(x, min_vx, max_vx, msg[i]);
+        x += VIRTUAL_MOD_WIDTH;
+    }
+}
+
+static void draw_big_digit(uint8_t screen, uint8_t mod, char c) {
+    int startX = matrix_get_virtual_mod_start(screen, mod);
+    uint8_t idx = 12;
+    if (c >= '0' && c <= '9') idx = c - '0';
+    else if (c == '.') idx = 10;
+    else if (c == '-') idx = 11;
+    for (uint8_t col = 0; col < 4; col++) {
+        uint8_t data = FONT_BIG_DIGITS[idx][col];
+        for (uint8_t r = 0; r < 8; r++) {
+            if (data & (1 << r)) {
+                matrix_set_pixel(startX + col, r, 1);
+            }
+        }
+    }
+}
+
+static void draw_icon(uint8_t screen, uint8_t mod, const uint8_t *icon) {
+    int startX = matrix_get_virtual_mod_start(screen, mod);
+    for (uint8_t col = 0; col < 5; col++) {
+        uint8_t data = icon[col];
+        for (uint8_t r = 0; r < 8; r++) {
+            if (data & (1 << r)) {
+                matrix_set_pixel(startX + col, r, 1);
+            }
+        }
+    }
+}
+
+static void draw_single_temp(uint8_t screen, uint8_t startMod, float temp) {
+    float abs_t = (temp < 0) ? -temp : temp;
+    int val = (int)(abs_t * 10.0f + 0.5f);
+    int d3 = val % 10;
+    int d2 = (val / 10) % 10;
+    int d1 = (val / 100) % 10;
+
+    if (temp <= -10.0f) {
+        draw_big_digit(screen, startMod, '-');
+        draw_big_digit(screen, startMod + 1, '0' + d1);
+        draw_big_digit(screen, startMod + 2, '0' + d2);
+        draw_big_digit(screen, startMod + 3, ' ');
+    } else if (temp < 0.0f) {
+        draw_big_digit(screen, startMod, '-');
+        draw_big_digit(screen, startMod + 1, '0' + d2);
+        draw_big_digit(screen, startMod + 2, '.');
+        draw_big_digit(screen, startMod + 3, '0' + d3);
+    } else {
+        draw_big_digit(screen, startMod, (temp >= 10.0f) ? ('0' + d1) : ' ');
+        draw_big_digit(screen, startMod + 1, '0' + d2);
+        draw_big_digit(screen, startMod + 2, '.');
+        draw_big_digit(screen, startMod + 3, '0' + d3);
+    }
+}
+
+void matrix_draw_4temps(float t1, float t2, float t3, float t4) {
+    draw_single_temp(0, 0, t1);
+    draw_icon(0, 5, ICON_SUN_MOD);
+    draw_single_temp(0, 9, t2);
+    draw_icon(0, 14, ICON_CLOUD_MOD);
+    draw_single_temp(1, 0, t3);
+    draw_icon(1, 5, ICON_RAIN_MOD);
+    draw_single_temp(1, 9, t4);
+    draw_icon(1, 14, ICON_THUNDER_MOD);
 }
 
 void matrix_screen_sweep(void) {
